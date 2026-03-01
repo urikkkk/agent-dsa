@@ -63,6 +63,20 @@ async function main(): Promise<void> {
     }
   }
 
+  // Fallback: load all active retailers when none mentioned in question
+  if (retailerIds.length === 0) {
+    const { data: allRetailers } = await db
+      .from('retailers')
+      .select('id, name')
+      .eq('is_active', true);
+    if (allRetailers && allRetailers.length > 0) {
+      retailerIds = allRetailers.map((r) => r.id);
+      console.log(`No retailers in question — using all active: ${allRetailers.map((r) => r.name).join(', ')}`);
+    } else {
+      console.log(`No retailers in question or DB — agent will use web_search_fallback`);
+    }
+  }
+
   // Create the run
   const { data: run, error } = await db
     .from('runs')

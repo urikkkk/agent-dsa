@@ -12,7 +12,14 @@ import {
   writeStepSummary,
   checkCompletionCriteria,
 } from './lib/ledger.js';
-import { isMemoryEnabled, memorySearch, memoryAdd, buildMemoryPayload } from './lib/supermemory.js';
+import {
+  isMemoryEnabled,
+  memorySearch,
+  memoryAdd,
+  addFinalAnswerMemory,
+  buildMemoryPayload,
+  buildSummaryMetadata,
+} from './lib/supermemory.js';
 import type { RunEventBus } from './lib/run-events.js';
 import type { Run, Location, Retailer, NimbleAgent, StepSummary } from '@agent-dsa/shared';
 
@@ -132,9 +139,19 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
       retailers,
     });
 
-    const webOpsUserPrompt = run.question_text
-      ? `Collect data for run ${runId}: ${run.question_text}\n\nAll retailer agents are in your system prompt. Use the fast path — serp_search → pdp_fetch → write_observation. Collect from ALL target retailers.`
-      : `Run ${runId}. No specific question — use find_wsa_template to discover agents, then collect broadly.`;
+    const hasConfiguredRetailers = retailers.length > 0;
+
+    let webOpsUserPrompt: string;
+    if (!run.question_text) {
+      // No question — discover broadly
+      webOpsUserPrompt = `Run ${runId}. No specific question — use find_wsa_template to discover agents, then collect broadly.`;
+    } else if (hasConfiguredRetailers) {
+      // Happy path — retailers available
+      webOpsUserPrompt = `Collect data for run ${runId}: ${run.question_text}\n\nAll ${retailers.length} retailer agents are listed in your system prompt. Use the fast path — serp_search → pdp_fetch → write_observation. Start NOW.`;
+    } else {
+      // Bootstrap — no retailers
+      webOpsUserPrompt = `Collect data for run ${runId}: ${run.question_text}\n\nNo retailers are pre-configured. Use web_search_fallback with focus="shopping" to find this product. Your first call should be: web_search_fallback(query="${run.question_text}", focus="shopping", run_id="${runId}"). Then url_extract_fallback on product URLs, then write_observation for each price found.`;
+    }
 
     const webOpsTools = createWebOpsToolServer();
     let webOpsTurnCounter = 0;
@@ -207,11 +224,14 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
 
     // ── Store WebOps summary in long-term memory (fire-and-forget) ──
     const retailerNames = retailers.map((r) => r.name);
-    memoryAdd(
-      runId, 'webops', 'webops-summary',
-      buildMemoryPayload(runId, 'webops', 'collection', webOpsSummary, run.question_text, retailerNames),
-      retailerIds.length > 0 ? retailerIds : undefined
-    );
+    memoryAdd({
+      runId,
+      agentName: 'webops',
+      stepName: 'collection',
+      content: buildMemoryPayload(runId, 'webops', 'collection', webOpsSummary, run.question_text, retailerNames),
+      retailerIds: retailerIds.length > 0 ? retailerIds : undefined,
+      metadata: buildSummaryMetadata(webOpsSummary),
+    });
 
     // ── Build collection summary ──────────────────────────────────────
 
@@ -257,11 +277,12 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
     // ── Memory retrieval (best-effort) ────────────────────────────
     let priorKnowledge = '';
     if (isMemoryEnabled() && run.question_text) {
-      priorKnowledge = await memorySearch(
+      priorKnowledge = await memorySearch({
         runId,
-        run.question_text,
-        retailerIds.length > 0 ? retailerIds : undefined
-      );
+        query: run.question_text,
+        retailerIds: retailerIds.length > 0 ? retailerIds : undefined,
+        agentName: 'dsa',
+      });
       if (priorKnowledge) {
         eventBus?.send({
           event_type: 'task_completed',
@@ -353,11 +374,14 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
     });
 
     // ── Store DSA summary in long-term memory (fire-and-forget) ──
-    memoryAdd(
-      runId, 'dsa', 'dsa-summary',
-      buildMemoryPayload(runId, 'dsa', 'analysis', dsaSummary, run.question_text, retailerNames),
-      retailerIds.length > 0 ? retailerIds : undefined
-    );
+    memoryAdd({
+      runId,
+      agentName: 'dsa',
+      stepName: 'analysis',
+      content: buildMemoryPayload(runId, 'dsa', 'analysis', dsaSummary, run.question_text, retailerNames),
+      retailerIds: retailerIds.length > 0 ? retailerIds : undefined,
+      metadata: buildSummaryMetadata(dsaSummary),
+    });
 
     // ── Finalize ──────────────────────────────────────────────────────
 
@@ -417,13 +441,24 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
       })
       .eq('id', runId);
 
-    // Get the answer ID for the response
+    // Get the answer for the response + memory storage
     const { data: answer } = await db
       .from('answers')
-      .select('id')
+      .select('id, answer_text, confidence, sources_count')
       .eq('run_id', runId)
       .limit(1)
       .single();
+
+    // ── Store final answer in long-term memory (fire-and-forget) ──
+    if (answer?.answer_text) {
+      addFinalAnswerMemory({
+        runId,
+        answerText: answer.answer_text as string,
+        confidence: answer.confidence as number | undefined,
+        sourcesCount: answer.sources_count as number | undefined,
+        retailerIds: retailerIds.length > 0 ? retailerIds : undefined,
+      });
+    }
 
     eventBus?.send({
       event_type: 'run_complete',

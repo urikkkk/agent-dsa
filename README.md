@@ -305,6 +305,80 @@ The agent's domain knowledge is organized as 18 small, reusable skill procedures
 
 The `index.md` registry maps question types (e.g., `best_price`, `serp_sov`) to the exact skill pipeline needed.
 
+## Supermemory (Long-Term Memory)
+
+Optional integration with [Supermemory](https://supermemory.com) for cross-run knowledge retention. When enabled, the agent stores step summaries and final answers after each run, and retrieves relevant prior knowledge before analysis. All memory operations are **best-effort** — failures are logged to the ledger with `next_action_hint: 'skip'` and never block the pipeline.
+
+### Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `SUPERMEMORY_ENABLED` | No | `false` | Set to `true` to enable memory read/write |
+| `SUPERMEMORY_API_KEY` | If enabled | — | Your Supermemory API key |
+| `SUPERMEMORY_TAG_PREFIX` | No | `nimble_agents` | Prefix for all container tags |
+| `SUPERMEMORY_DEFAULT_TAGS` | No | — | Comma-separated extra tags added to every document |
+
+### Tagging Scheme
+
+Every document stored in Supermemory gets canonical container tags for filtering:
+
+```
+{PREFIX}:env:{NODE_ENV}          # always present (e.g. nimble_agents:env:prod)
+{PREFIX}:org:nimble              # always present
+{PREFIX}:user:{userId}           # when user context available
+{PREFIX}:retailer:{retailerId}   # one per retailer
+{PREFIX}:agent:{agentName}       # webops | dsa
+{PREFIX}:step:{stepName}         # collection | analysis
+{PREFIX}:run:{runId}             # links to specific run
+```
+
+Documents are written with deterministic `customId` values (`{runId}:{agentName}:{stepName}:summary` for step summaries, `{runId}:final_answer` for answers) to support idempotent upserts.
+
+### Dual-Scope Search
+
+Before the DSA analysis phase, the orchestrator runs two parallel searches:
+
+1. **Search A** (narrow): `env + org + retailer + user` tags — finds user-specific history
+2. **Search B** (broad): `env + org + retailer` tags only — catches cross-user knowledge
+
+Results are merged and deduplicated by `documentId`, capped at `limit` (default 5). Search B only runs when a `userId` is present (otherwise A and B would be identical).
+
+### Observability
+
+Memory operations emit full lifecycle ledger events (`started` → `completed`/`failed`) with:
+- `latency_ms` metrics
+- Artifact references (SHA-256 deduplicated search/add payloads)
+- `next_action_hint: 'skip'` on failure (so the orchestrator continues without memory)
+
+### Debug Tools
+
+**CLI** — verify connectivity and run dual searches from the terminal:
+
+```bash
+npx tsx agent/src/cli-memory-debug.ts \
+  --retailerId ret-123 \
+  --userId user-456 \
+  --query "Cheerios pricing"
+```
+
+**HTTP endpoint** — same diagnostics via the API server:
+
+```
+GET /memory/debug?retailerId=ret-123&userId=user-456&query=Cheerios+pricing
+```
+
+Both return:
+
+```json
+{
+  "enabled": true,
+  "health": { "ok": true, "latency_ms": 142 },
+  "search_a": { "tags": ["nimble_agents:env:dev", "..."], "count": 3, "snippets": ["..."] },
+  "search_b": { "tags": ["nimble_agents:env:dev", "..."], "count": 5, "snippets": ["..."] },
+  "merged_count": 8
+}
+```
+
 ## Performance
 
 Optimized two-agent workflow targeting 7-9 WebOps turns + 3-4 DSA turns, ~$0.30 per question:

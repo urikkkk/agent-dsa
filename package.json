@@ -6,6 +6,7 @@
   "scripts": {
     "agent": "npx tsx agent/src/index.ts",
     "agent:cli": "npx tsx agent/src/cli.ts",
+    "agent:serve": "npx tsx agent/src/serve.ts",
     "db:push": "npx supabase db push",
     "db:seed": "npx supabase db seed"
   }
