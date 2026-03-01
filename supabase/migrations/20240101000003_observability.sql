@@ -12,7 +12,7 @@ CREATE TYPE ledger_event_type AS ENUM ('task', 'step', 'tool_door_violation', 'w
 
 -- Append-only event log for all agent activity
 CREATE TABLE ledger_events (
-  id              uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   run_id          uuid NOT NULL REFERENCES runs(id),
   event_type      ledger_event_type NOT NULL DEFAULT 'task',
   agent_name      text NOT NULL,
@@ -20,7 +20,7 @@ CREATE TABLE ledger_events (
   task_id         text NOT NULL,
   attempt         int NOT NULL DEFAULT 1,
   status          ledger_event_status NOT NULL,
-  span_id         uuid DEFAULT uuid_generate_v4(),
+  span_id         uuid DEFAULT gen_random_uuid(),
   parent_span_id  uuid,
   tool_name       text,
   input_ref       uuid,
@@ -34,7 +34,7 @@ CREATE TABLE ledger_events (
 
 -- Raw I/O artifact storage with hash-based deduplication
 CREATE TABLE ledger_artifacts (
-  id              uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
+  id              uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   run_id          uuid NOT NULL REFERENCES runs(id),
   content_type    text NOT NULL DEFAULT 'application/json',
   payload         jsonb,
