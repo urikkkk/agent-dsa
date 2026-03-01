@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import type { Run, Location, Retailer, NimbleAgent } from '@agent-dsa/shared';
 
 interface PromptContext {
@@ -5,6 +7,18 @@ interface PromptContext {
   location?: Location;
   retailers: Array<Retailer & { serp_agent?: NimbleAgent; pdp_agent?: NimbleAgent }>;
 }
+
+const SKILLS_DIR = join(__dirname, '..', '..', 'docs', 'skills');
+
+function loadSkill(filename: string): string {
+  try {
+    return readFileSync(join(SKILLS_DIR, filename), 'utf-8');
+  } catch {
+    return '';
+  }
+}
+
+const skillsIndex = loadSkill('index.md');
 
 export function buildSystemPrompt(ctx: PromptContext): string {
   const locationInfo = ctx.location
@@ -57,5 +71,20 @@ ${retailerInfo || 'No retailers configured. Use read_config to find available re
 - Use the location's ZIP code when the retailer supports location-based pricing.
 - WSA calls (serp_search, pdp_fetch) take 10-120 seconds — this is normal, not a timeout.
 - Include source URLs, confidence scores (0-1), and collection_tier ('wsa' or 'search_extract').
-- Be efficient — don't fetch more PDPs than necessary to answer the question.`;
+- Be efficient — don't fetch more PDPs than necessary to answer the question.
+
+## Skills Reference
+The following skills index provides detailed procedures for each step. Consult the relevant skill when you need specifics on agent selection, data parsing, validation rules, or retailer quirks.
+
+<skills-index>
+${skillsIndex}
+</skills-index>`;
+}
+
+/**
+ * Load a specific skill document by name (without .md extension).
+ * Useful for injecting retailer-specific or metric-specific knowledge on demand.
+ */
+export function loadSkillContent(skillName: string): string {
+  return loadSkill(`${skillName}.md`);
 }

@@ -37,6 +37,7 @@ All API calls, tool invocations, and validation decisions are logged to Supabase
 ```
 agent-dsa/
 ├── agent/       # Agent executor — tools, prompts, Nimble client
+├── docs/skills/ # 18 reusable skill procedures + index (domain knowledge)
 ├── shared/      # Shared TypeScript types
 ├── web/         # Web frontend (Next.js)
 └── supabase/    # Database migrations and seed data
@@ -210,6 +211,20 @@ The seed includes:
 - **12 products** — General Mills cereals and snacks (Cheerios, Nature Valley, etc.)
 - **6 question templates** — Covering pricing, trends, stock, SERP, assortment, promotions
 - **Keyword sets** — Core cereal and snack search terms
+
+## Knowledge-Base Skills
+
+The agent's domain knowledge is organized as 18 small, reusable skill procedures in `docs/skills/`. Each skill has a focused scope, clear triggers, step-by-step procedure, success criteria, and examples. The skills index is injected into the system prompt at build time.
+
+| Category | Skills |
+|----------|--------|
+| **Nimble API** | `wsa-agent-selection`, `sync-wsa-inventory`, `nimble-api-reference` |
+| **Data Collection** | `listing-collection`, `detail-collection`, `fallback-collection`, `sync-web-toolbox` |
+| **Data Processing** | `normalize-product-data`, `validate-observation`, `write-observation`, `write-answer`, `log-step-artifacts` |
+| **Retailer Profiles** | `retailer-amazon`, `retailer-walmart`, `retailer-target`, `retailer-kroger` |
+| **E-Commerce Intel** | `digital-shelf-metrics`, `category-rules` |
+
+The `index.md` registry maps question types (e.g., `best_price`, `serp_sov`) to the exact skill pipeline needed.
 
 ## Performance
 
