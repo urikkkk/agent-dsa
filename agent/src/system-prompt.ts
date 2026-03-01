@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { Run, Location, Retailer, NimbleAgent } from '@agent-dsa/shared';
 
 interface PromptContext {
@@ -8,6 +9,8 @@ interface PromptContext {
   retailers: Array<Retailer & { serp_agent?: NimbleAgent; pdp_agent?: NimbleAgent }>;
 }
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 const SKILLS_DIR = join(__dirname, '..', '..', 'docs', 'skills');
 
 function loadSkill(filename: string): string {
