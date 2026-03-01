@@ -55,69 +55,44 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
     Retailer & { serp_agent?: NimbleAgent; pdp_agent?: NimbleAgent }
   > = [];
 
-  if (retailerIds.length > 0) {
-    const { data: retailerRows } = await db
-      .from('retailers')
-      .select('*')
-      .in('id', retailerIds);
+  // Load retailers
+  const retailerQuery = retailerIds.length > 0
+    ? db.from('retailers').select('*').in('id', retailerIds)
+    : db.from('retailers').select('*').eq('is_active', true);
 
-    if (retailerRows) {
-      // Load agents for each retailer
-      for (const r of retailerRows) {
-        const retailer = r as Retailer & {
-          serp_agent?: NimbleAgent;
-          pdp_agent?: NimbleAgent;
-        };
-        if (r.serp_agent_id) {
-          const { data: agent } = await db
-            .from('nimble_agents')
-            .select('*')
-            .eq('id', r.serp_agent_id)
-            .single();
-          if (agent) retailer.serp_agent = agent as NimbleAgent;
+  const { data: retailerRows } = await retailerQuery;
+
+  if (retailerRows && retailerRows.length > 0) {
+    // Collect all agent IDs and batch-load in a single query
+    const allAgentIds = [
+      ...new Set(
+        retailerRows
+          .flatMap((r) => [r.serp_agent_id, r.pdp_agent_id])
+          .filter((id): id is string => id != null)
+      ),
+    ];
+
+    const agentMap = new Map<string, NimbleAgent>();
+    if (allAgentIds.length > 0) {
+      const { data: agents } = await db
+        .from('nimble_agents')
+        .select('*')
+        .in('id', allAgentIds);
+      if (agents) {
+        for (const a of agents) {
+          agentMap.set(a.id, a as NimbleAgent);
         }
-        if (r.pdp_agent_id) {
-          const { data: agent } = await db
-            .from('nimble_agents')
-            .select('*')
-            .eq('id', r.pdp_agent_id)
-            .single();
-          if (agent) retailer.pdp_agent = agent as NimbleAgent;
-        }
-        retailers.push(retailer);
       }
     }
-  } else {
-    // If no retailers specified, load all active ones
-    const { data: allRetailers } = await db
-      .from('retailers')
-      .select('*')
-      .eq('is_active', true);
 
-    if (allRetailers) {
-      for (const r of allRetailers) {
-        const retailer = r as Retailer & {
-          serp_agent?: NimbleAgent;
-          pdp_agent?: NimbleAgent;
-        };
-        if (r.serp_agent_id) {
-          const { data: agent } = await db
-            .from('nimble_agents')
-            .select('*')
-            .eq('id', r.serp_agent_id)
-            .single();
-          if (agent) retailer.serp_agent = agent as NimbleAgent;
-        }
-        if (r.pdp_agent_id) {
-          const { data: agent } = await db
-            .from('nimble_agents')
-            .select('*')
-            .eq('id', r.pdp_agent_id)
-            .single();
-          if (agent) retailer.pdp_agent = agent as NimbleAgent;
-        }
-        retailers.push(retailer);
-      }
+    for (const r of retailerRows) {
+      const retailer = r as Retailer & {
+        serp_agent?: NimbleAgent;
+        pdp_agent?: NimbleAgent;
+      };
+      if (r.serp_agent_id) retailer.serp_agent = agentMap.get(r.serp_agent_id);
+      if (r.pdp_agent_id) retailer.pdp_agent = agentMap.get(r.pdp_agent_id);
+      retailers.push(retailer);
     }
   }
 
@@ -130,8 +105,8 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
 
   // Build the user prompt
   const userPrompt = run.question_text
-    ? `Execute the following question for run ${runId}:\n\n${run.question_text}\n\nCollect data, validate it, write observations, and produce a final answer.`
-    : `Execute run ${runId}. Read the run configuration and available data, then collect and analyze the requested information.`;
+    ? `Run ${runId}: ${run.question_text}\n\nAll retailer agents are in your system prompt. Use the fast path — serp_search → pdp_fetch → write_observation → write_answer. Do not call read_config or find_wsa_template.`
+    : `Run ${runId}. No specific question provided — call read_config to discover what data to collect, then follow the fast path.`;
 
   // Create tools MCP server
   const dsaTools = createDsaToolServer();
@@ -146,6 +121,7 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
     let totalCostUsd = 0;
     let numTurns = 0;
     let resultText = '';
+    let turnCounter = 0;
 
     for await (const message of query({
       prompt: userPrompt,
@@ -162,6 +138,19 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
       },
     })) {
       const msg = message as SDKMessage;
+
+      // Print turn-by-turn progress for debugging
+      if (msg.type === 'assistant' && 'content' in msg) {
+        turnCounter++;
+        const content = msg.content as Array<Record<string, unknown>>;
+        const toolUses = content
+          .filter((c) => c.type === 'tool_use')
+          .map((c) => c.name as string);
+        if (toolUses.length > 0) {
+          console.log(`  [turn ${turnCounter}] ${toolUses.join(', ')}`);
+        }
+      }
+
       if (msg.type === 'result') {
         const result = msg as Extract<SDKMessage, { type: 'result' }>;
         if ('total_cost_usd' in result) {

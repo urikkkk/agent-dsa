@@ -4,12 +4,16 @@ AI-powered e-commerce intelligence platform that collects product data (prices, 
 
 ## How It Works
 
-A natural language question like _"Best price for Cheerios across Amazon and Walmart in Chicago"_ triggers a Claude AI agent that:
+A natural language question like _"Best price for Cheerios across Amazon and Walmart in Chicago"_ triggers a Claude AI agent that follows an optimized decision tree:
 
-1. Searches retailer SERPs for matching products
-2. Fetches product detail pages for structured pricing data
-3. Validates and normalizes observations (price bounds, unit price, stock status)
-4. Compares results and returns a confidence-scored answer with source URLs
+**Fast Path** (retailer + product known — 4 steps, ~7-9 agent turns):
+1. `serp_search` — find matching products on the retailer SERP
+2. `pdp_fetch` — get structured pricing from product detail pages
+3. `write_observation` — auto-validates and persists in one call
+4. `write_answer` — returns a confidence-scored answer with source URLs
+
+**Discovery Path** (ambiguous query): reads config first, then follows the fast path.
+**Fallback Path** (WSA agent unavailable): uses `web_search_fallback` + `url_extract_fallback`.
 
 All API calls, tool invocations, and validation decisions are logged to Supabase for full observability.
 
@@ -116,7 +120,7 @@ npm run agent:cli "Best price for Cheerios in Chicago"
 
 ## Agent Tools
 
-The Claude agent has access to 11 specialized tools organized by tier:
+The Claude agent has access to 13 specialized tools organized by tier:
 
 ### Data Collection (Tier 1 — WSA)
 | Tool | Description |
@@ -139,27 +143,30 @@ The Claude agent has access to 11 specialized tools organized by tier:
 ### Data Write
 | Tool | Description |
 |------|-------------|
-| `write_observation` | Store a validated price/availability data point |
+| `write_observation` | Auto-validates and stores a price/availability data point |
 | `write_serp_candidates` | Store ranked search result listings |
+| `dedup_and_write_serp_candidates` | Deduplicate and persist SERP results in one call |
 | `write_answer` | Store the final computed answer |
 
 ### Quality
 | Tool | Description |
 |------|-------------|
-| `validate_observation` | Run quality checks (price bounds, unit price, URL domain) |
-| `dedup_candidates` | Remove duplicate SERP results |
+| `validate_observation` | Optional pre-check (write_observation auto-validates) |
+| `dedup_candidates` | Remove duplicate SERP results (standalone) |
 
 ## Data Validation
 
-Every observation is validated with category-specific checks:
+Every observation is **auto-validated** inside `write_observation` with category-specific checks:
 
 - Price is positive and within bounds (e.g., cereal: $0.50 - $30)
 - Promo price < shelf price
 - Size parses correctly (supports oz, lb, g, kg, multi-packs)
 - Unit price is consistent (price / size within 10%)
 - Source URL domain matches retailer
+- Rating within 0-5 range
+- Confidence within 0-1 range
 
-Each check produces a quality score (0.3 fail / 0.7 warn / 1.0 pass) and a confidence-weighted final score.
+Each check produces a quality score (0.3 fail / 0.7 warn / 1.0 pass). Validation results are returned inline with the write response — no separate `validate_observation` call needed.
 
 ## Question Templates
 
@@ -177,11 +184,13 @@ Each check produces a quality score (0.3 fail / 0.7 warn / 1.0 pass) and a confi
 22 tables organized into:
 
 - **Config** — `locations`, `retailers`, `nimble_agents`, `products`, `product_matches`
-- **Workflow** — `question_templates`, `keyword_sets`, `runs`, `answers`
-- **Data** — `serp_candidates`, `observations`, `run_steps`
+- **Workflow** — `question_templates`, `keyword_sets`, `runs`, `answers` (unique per run)
+- **Data** — `serp_candidates`, `observations` (deduplicated per run+retailer+product+location), `run_steps`
 - **API Tracking** — `nimble_requests`, `nimble_responses`, `fallback_events`
 - **Quality** — `validation_results`, `agent_logs`, `run_errors`, `agent_health_daily`
 - **Admin** — `subscriptions`, `audit_events`
+
+Key indexes: `observations(product_id)`, `observations(validation_status)`, `observations(created_at DESC)`, `products(upc)`, `nimble_responses(nimble_request_id)`, `run_steps(run_id)`.
 
 ## Scripts
 
@@ -201,6 +210,20 @@ The seed includes:
 - **12 products** — General Mills cereals and snacks (Cheerios, Nature Valley, etc.)
 - **6 question templates** — Covering pricing, trends, stock, SERP, assortment, promotions
 - **Keyword sets** — Core cereal and snack search terms
+
+## Performance
+
+Optimized agent workflow targeting 7-9 turns and ~$0.30 per question (down from 22 turns / $0.88 baseline):
+
+| Optimization | Impact |
+|-------------|--------|
+| Conditional decision tree (skip read_config/find_wsa_template) | ~10 fewer turns |
+| Auto-validation in write_observation | 1 fewer turn per observation |
+| Combined dedup_and_write_serp_candidates | 1 fewer turn |
+| Batch agent loading (single DB query) | 3-10s faster startup |
+| Reduced retry delays for fallback tools | 2-4s faster on retries |
+| Fire-and-forget logging | Non-blocking tool calls |
+| Turn-by-turn CLI progress (`[turn N] tool_name...`) | Debugging visibility |
 
 ## License
 

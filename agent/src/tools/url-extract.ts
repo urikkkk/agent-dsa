@@ -48,7 +48,7 @@ export const urlExtractFallbackTool = tool(
           output_format: args.output_format,
           render: args.render,
         }),
-      { maxAttempts: 2, baseDelayMs: 3000, maxDelayMs: 15000 }
+      { maxAttempts: 2, baseDelayMs: 1000, maxDelayMs: 10000 }
     );
 
     const latencyMs = Date.now() - startTime;

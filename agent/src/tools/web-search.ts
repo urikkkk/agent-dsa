@@ -74,7 +74,7 @@ export const webSearchFallbackTool = tool(
           include_domains: args.include_domains,
           deep_search: args.deep_search,
         }),
-      { maxAttempts: 2, baseDelayMs: 3000, maxDelayMs: 15000 }
+      { maxAttempts: 2, baseDelayMs: 1000, maxDelayMs: 10000 }
     );
 
     const latencyMs = Date.now() - startTime;

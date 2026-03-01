@@ -10,17 +10,20 @@ export function createLoggingHook(runId: string): HookCallback {
     const db = getSupabase();
     const hookInput = input as Record<string, unknown>;
 
-    try {
-      await db.from('agent_logs').insert({
-        run_id: runId,
-        session_id: hookInput.session_id || null,
-        tool_name: hookInput.tool_name || null,
-        tool_input: hookInput.tool_input as Record<string, unknown> || null,
-        tool_output: hookInput.tool_response as Record<string, unknown> || null,
-      });
-    } catch {
-      // Don't let logging failures break the agent
-    }
+    // Fire-and-forget — don't await the DB insert
+    void (async () => {
+      try {
+        await db.from('agent_logs').insert({
+          run_id: runId,
+          session_id: hookInput.session_id || null,
+          tool_name: hookInput.tool_name || null,
+          tool_input: hookInput.tool_input as Record<string, unknown> || null,
+          tool_output: hookInput.tool_response as Record<string, unknown> || null,
+        });
+      } catch {
+        // Don't let logging failures break the agent
+      }
+    })();
 
     return {};
   };

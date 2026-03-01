@@ -11,7 +11,7 @@ import {
   writeAnswerTool,
 } from './write-results.js';
 import { validateObservationTool } from './validate.js';
-import { dedupTool } from './dedup.js';
+import { dedupTool, dedupAndWriteSerpCandidatesTool } from './dedup.js';
 
 export function createDsaToolServer() {
   return createSdkMcpServer({
@@ -28,6 +28,7 @@ export function createDsaToolServer() {
       writeAnswerTool,
       validateObservationTool,
       dedupTool,
+      dedupAndWriteSerpCandidatesTool,
     ],
   });
 }

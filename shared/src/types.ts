@@ -490,7 +490,7 @@ export interface NimbleSerpResult {
 export interface NimblePdpResult {
   title: string;
   brand?: string;
-  price: number;
+  price: number | null;
   promo_price?: number;
   size_raw?: string;
   unit_price?: number;
