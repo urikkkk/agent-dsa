@@ -15,10 +15,10 @@ const ALLOWED_TOOLS: Record<AgentName, Set<string>> = {
     'pdp_fetch',
     'web_search_fallback',
     'url_extract_fallback',
-    'find_template',
+    'find_wsa_template',
     'write_observation',
     'write_serp_candidates',
-    'dedup_and_write',
+    'dedup_and_write_serp_candidates',
   ]),
   dsa: new Set([
     'read_config',

@@ -162,6 +162,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
         model,
         maxTurns: webOpsMaxTurns,
         systemPrompt: webOpsPrompt,
+        tools: [],
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         mcpServers: { 'webops-tools': webOpsTools },
@@ -171,6 +172,28 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
       },
     })) {
       const msg = message as SDKMessage;
+
+      // ── Init message: log tools & MCP status, fail fast if disconnected ──
+      if (msg.type === 'system' && 'subtype' in msg && msg.subtype === 'init') {
+        const init = msg as Extract<SDKMessage, { type: 'system'; subtype: 'init' }>;
+        console.log(`[webops] init: model=${init.model}, tools=[${init.tools.join(', ')}] (${init.tools.length})`);
+        for (const srv of init.mcp_servers) {
+          console.log(`[webops] mcp_server: ${srv.name} → ${srv.status}`);
+        }
+        eventBus?.send({
+          event_type: 'step_started',
+          agent_name: 'webops',
+          step_name: 'collection',
+          message: `Init: ${init.tools.length} tools, MCP servers: ${init.mcp_servers.map((s) => `${s.name}=${s.status}`).join(', ')}`,
+        });
+        const disconnected = init.mcp_servers.filter((s) => s.status !== 'connected');
+        if (disconnected.length > 0) {
+          throw new Error(`WebOps MCP server(s) not connected: ${disconnected.map((s) => `${s.name}=${s.status}`).join(', ')}`);
+        }
+        if (init.tools.length === 0) {
+          throw new Error('WebOps init reported 0 tools — MCP server likely failed to register tools');
+        }
+      }
 
       if (msg.type === 'assistant' && 'content' in msg) {
         webOpsTurnCounter++;
@@ -192,12 +215,25 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
       }
 
       if (msg.type === 'result') {
-        const result = msg as Extract<SDKMessage, { type: 'result' }>;
+        const result = msg as Record<string, unknown>;
         if ('total_cost_usd' in result) {
-          totalCostUsd += (result as Record<string, unknown>).total_cost_usd as number;
+          totalCostUsd += result.total_cost_usd as number;
         }
         if ('num_turns' in result) {
-          totalTurns += (result as Record<string, unknown>).num_turns as number;
+          totalTurns += result.num_turns as number;
+        }
+        // Log error details from result
+        const subtype = result.subtype as string | undefined;
+        if (subtype && subtype !== 'success') {
+          console.warn(`[webops] result subtype: ${subtype}`);
+        }
+        const errors = result.errors as string[] | undefined;
+        if (errors && errors.length > 0) {
+          console.warn(`[webops] errors:`, errors);
+        }
+        const permDenials = result.permission_denials as Array<{ tool_name: string }> | undefined;
+        if (permDenials && permDenials.length > 0) {
+          console.warn(`[webops] permission_denials:`, permDenials.map((d) => d.tool_name));
         }
       }
     }
@@ -313,6 +349,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
         model,
         maxTurns: dsaMaxTurns,
         systemPrompt: dsaPrompt,
+        tools: [],
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         mcpServers: { 'dsa-tools': dsaTools },
@@ -322,6 +359,28 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
       },
     })) {
       const msg = message as SDKMessage;
+
+      // ── Init message: log tools & MCP status, fail fast if disconnected ──
+      if (msg.type === 'system' && 'subtype' in msg && msg.subtype === 'init') {
+        const init = msg as Extract<SDKMessage, { type: 'system'; subtype: 'init' }>;
+        console.log(`[dsa] init: model=${init.model}, tools=[${init.tools.join(', ')}] (${init.tools.length})`);
+        for (const srv of init.mcp_servers) {
+          console.log(`[dsa] mcp_server: ${srv.name} → ${srv.status}`);
+        }
+        eventBus?.send({
+          event_type: 'step_started',
+          agent_name: 'dsa',
+          step_name: 'analysis',
+          message: `Init: ${init.tools.length} tools, MCP servers: ${init.mcp_servers.map((s) => `${s.name}=${s.status}`).join(', ')}`,
+        });
+        const disconnected = init.mcp_servers.filter((s) => s.status !== 'connected');
+        if (disconnected.length > 0) {
+          throw new Error(`DSA MCP server(s) not connected: ${disconnected.map((s) => `${s.name}=${s.status}`).join(', ')}`);
+        }
+        if (init.tools.length === 0) {
+          throw new Error('DSA init reported 0 tools — MCP server likely failed to register tools');
+        }
+      }
 
       if (msg.type === 'assistant' && 'content' in msg) {
         dsaTurnCounter++;
@@ -343,12 +402,25 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
       }
 
       if (msg.type === 'result') {
-        const result = msg as Extract<SDKMessage, { type: 'result' }>;
+        const result = msg as Record<string, unknown>;
         if ('total_cost_usd' in result) {
-          totalCostUsd += (result as Record<string, unknown>).total_cost_usd as number;
+          totalCostUsd += result.total_cost_usd as number;
         }
         if ('num_turns' in result) {
-          totalTurns += (result as Record<string, unknown>).num_turns as number;
+          totalTurns += result.num_turns as number;
+        }
+        // Log error details from result
+        const subtype = result.subtype as string | undefined;
+        if (subtype && subtype !== 'success') {
+          console.warn(`[dsa] result subtype: ${subtype}`);
+        }
+        const errors = result.errors as string[] | undefined;
+        if (errors && errors.length > 0) {
+          console.warn(`[dsa] errors:`, errors);
+        }
+        const permDenials = result.permission_denials as Array<{ tool_name: string }> | undefined;
+        if (permDenials && permDenials.length > 0) {
+          console.warn(`[dsa] permission_denials:`, permDenials.map((d) => d.tool_name));
         }
       }
     }
