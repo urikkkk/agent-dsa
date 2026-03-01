@@ -7,12 +7,11 @@ import { getSupabase } from '../lib/supabase.js';
 
 export const serpSearchTool = tool(
   'serp_search',
-  'Search a retailer SERP using a Nimble WSA template. Returns ranked product results with prices, titles, and URLs. Use this as the primary way to find products at a specific retailer.',
+  'Search a retailer SERP using a Nimble WSA agent. Returns ranked product results with prices, titles, and URLs. Use this as the primary way to find products at a specific retailer. The agent_name should match the retailer (e.g., "amazon_serp", "walmart_serp", "target_serp", "kroger_serp").',
   {
-    template_id: z.number().describe('Nimble WSA template ID for the retailer SERP agent'),
-    query: z.string().describe('Search query (e.g., "Cheerios cereal")'),
+    agent_name: z.string().describe('Nimble WSA agent name for the retailer SERP (e.g., "amazon_serp", "walmart_serp")'),
+    keyword: z.string().describe('Search keyword (e.g., "Cheerios cereal")'),
     zip_code: z.string().optional().describe('ZIP code for location-specific results'),
-    num_results: z.number().optional().default(30).describe('Number of results to fetch'),
     run_id: z.string().optional().describe('Run ID for logging'),
     retailer_id: z.string().optional().describe('Retailer UUID for logging'),
   },
@@ -29,15 +28,13 @@ export const serpSearchTool = tool(
         .insert({
           run_id: args.run_id,
           retailer_id: args.retailer_id,
-          agent_template_id: args.template_id,
           collection_tier: 'wsa',
           request_payload: {
-            template_id: args.template_id,
-            query: args.query,
+            agent_name: args.agent_name,
+            keyword: args.keyword,
             zip_code: args.zip_code,
-            num_results: args.num_results,
           },
-          keyword: args.query,
+          keyword: args.keyword,
           location_context: args.zip_code ? { zip_code: args.zip_code } : null,
         })
         .select('id')
@@ -48,12 +45,11 @@ export const serpSearchTool = tool(
     const result = await withRetry(
       () =>
         nimble.runSearchAgent({
-          template_id: args.template_id,
-          query: args.query,
+          agent_name: args.agent_name,
+          keyword: args.keyword,
           zip_code: args.zip_code,
-          num_results: args.num_results,
         }),
-      { maxAttempts: 3 }
+      { maxAttempts: 2, baseDelayMs: 3000, maxDelayMs: 15000 }
     );
 
     const latencyMs = Date.now() - startTime;
@@ -82,17 +78,19 @@ export const serpSearchTool = tool(
       };
     }
 
-    const parsed = parseSerpResults(
-      (result.data as unknown as Record<string, unknown>)?.data ?? result.data
-    );
+    // The WSA response has data.parsed_items (array of structured items)
+    const responseData = result.data as unknown as Record<string, unknown>;
+    const rawData = responseData?.data as Record<string, unknown>;
+    const parsedItems = (rawData?.parsed_items as unknown[]) || [];
+
+    const parsed = parseSerpResults(parsedItems);
 
     // Log response
     if (requestId) {
-      const payload = JSON.stringify(result.data);
       await db.from('nimble_responses').insert({
         nimble_request_id: requestId,
-        raw_payload: result.data as unknown as Record<string, unknown>,
-        payload_size_bytes: payload.length,
+        raw_payload: { task_id: responseData?.task_id, url: responseData?.url, result_count: parsed.length },
+        payload_size_bytes: JSON.stringify(responseData).length,
         parsing_summary: { result_count: parsed.length },
         http_status: 200,
         latency_ms: latencyMs,
@@ -107,8 +105,9 @@ export const serpSearchTool = tool(
             success: true,
             result_count: parsed.length,
             results: parsed,
-            query: args.query,
-            template_id: args.template_id,
+            keyword: args.keyword,
+            agent_name: args.agent_name,
+            source_url: responseData?.url,
           }),
         },
       ],

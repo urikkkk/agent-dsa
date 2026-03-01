@@ -1,3 +1,9 @@
+import { config } from 'dotenv';
+config({ path: '.env.local' });
+
+// Allow running inside an existing Claude Code session
+delete process.env.CLAUDECODE;
+
 import { getSupabase } from './lib/supabase.js';
 import { executeQuestion } from './execute-question.js';
 

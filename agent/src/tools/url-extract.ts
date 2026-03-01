@@ -6,14 +6,14 @@ import { getSupabase } from '../lib/supabase.js';
 
 export const urlExtractFallbackTool = tool(
   'url_extract_fallback',
-  'Tier 2 fallback: Extract structured content from a URL via Nimble. Use when no PDP WSA template exists, or to extract product data from an arbitrary page. Returns page content as markdown or structured data.',
+  'Tier 2 fallback: Extract structured content from a URL via Nimble Extract API. Use when no PDP WSA template exists, or to extract product data from an arbitrary page. Returns page content as markdown or structured data.',
   {
     url: z.string().describe('URL to extract content from'),
-    render: z.boolean().optional().default(false).describe('Render JavaScript before extraction'),
-    content_type: z
-      .enum(['html', 'markdown', 'text'])
+    output_format: z
+      .enum(['html', 'markdown', 'simplified_html'])
       .optional()
       .default('markdown'),
+    render: z.boolean().optional().default(false).describe('Render JavaScript before extraction'),
     run_id: z.string().optional(),
     retailer_id: z.string().optional(),
   },
@@ -32,8 +32,8 @@ export const urlExtractFallbackTool = tool(
           collection_tier: 'search_extract',
           request_payload: {
             url: args.url,
+            output_format: args.output_format,
             render: args.render,
-            content_type: args.content_type,
           },
         })
         .select('id')
@@ -45,10 +45,10 @@ export const urlExtractFallbackTool = tool(
       () =>
         nimble.urlExtract({
           url: args.url,
+          output_format: args.output_format,
           render: args.render,
-          content_type: args.content_type,
         }),
-      { maxAttempts: 2 }
+      { maxAttempts: 2, baseDelayMs: 3000, maxDelayMs: 15000 }
     );
 
     const latencyMs = Date.now() - startTime;
@@ -58,7 +58,7 @@ export const urlExtractFallbackTool = tool(
       await db.from('nimble_responses').insert({
         nimble_request_id: requestId,
         raw_payload: result.success
-          ? (result.data as unknown as Record<string, unknown>)
+          ? { title: result.data?.title, url: result.data?.url }
           : null,
         payload_size_bytes: payload.length,
         http_status: result.success ? 200 : 0,
@@ -87,7 +87,9 @@ export const urlExtractFallbackTool = tool(
           type: 'text' as const,
           text: JSON.stringify({
             success: true,
-            data: result.data,
+            title: result.data?.title,
+            url: result.data?.url,
+            content: result.data?.content,
           }),
         },
       ],

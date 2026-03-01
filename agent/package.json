@@ -8,10 +8,11 @@
     "cli": "tsx src/cli.ts"
   },
   "dependencies": {
+    "@agent-dsa/shared": "*",
     "@anthropic-ai/claude-agent-sdk": "^0.2.63",
     "@supabase/supabase-js": "^2.98.0",
-    "zod": "^4.0.0",
-    "@agent-dsa/shared": "*"
+    "dotenv": "^17.3.1",
+    "zod": "^4.0.0"
   },
   "devDependencies": {
     "@types/node": "^22",

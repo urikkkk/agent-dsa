@@ -6,19 +6,24 @@ import { getSupabase } from '../lib/supabase.js';
 
 export const webSearchFallbackTool = tool(
   'web_search_fallback',
-  'Tier 2 fallback: Generic web search via Nimble. Use when no WSA template exists for a retailer, or when WSA SERP search fails. Returns web search results that can be used with url_extract_fallback.',
+  'Tier 2 fallback: Search the web via Nimble Search API. Use when no WSA template exists for a retailer, or when WSA SERP search fails. Supports focus modes: general, shopping, news. Returns structured search results with product data.',
   {
     query: z.string().describe('Search query (e.g., "Cheerios price walmart.com")'),
     focus: z
       .enum(['general', 'shopping', 'news'])
       .optional()
       .default('shopping')
-      .describe('Search focus mode'),
+      .describe('Search focus mode. "shopping" uses WSA-based AI-powered extraction.'),
     max_results: z.number().optional().default(10),
     include_domains: z
       .array(z.string())
       .optional()
       .describe('Restrict results to these domains'),
+    deep_search: z
+      .boolean()
+      .optional()
+      .default(false)
+      .describe('Enable deep content extraction (slower but more detailed)'),
     run_id: z.string().optional(),
     retailer_id: z.string().optional(),
   },
@@ -67,8 +72,9 @@ export const webSearchFallbackTool = tool(
           focus: args.focus,
           max_results: args.max_results,
           include_domains: args.include_domains,
+          deep_search: args.deep_search,
         }),
-      { maxAttempts: 2 }
+      { maxAttempts: 2, baseDelayMs: 3000, maxDelayMs: 15000 }
     );
 
     const latencyMs = Date.now() - startTime;
@@ -77,12 +83,12 @@ export const webSearchFallbackTool = tool(
       await db.from('nimble_responses').insert({
         nimble_request_id: requestId,
         raw_payload: result.success
-          ? (result.data as unknown as Record<string, unknown>)
+          ? { total_results: result.data?.total_results, request_id: result.data?.request_id }
           : null,
         http_status: result.success ? 200 : 0,
         latency_ms: latencyMs,
         parsing_summary: result.success
-          ? { source: 'web_search' }
+          ? { source: 'web_search', result_count: result.data?.total_results }
           : { error: result.errors },
       });
     }
@@ -108,7 +114,8 @@ export const webSearchFallbackTool = tool(
           type: 'text' as const,
           text: JSON.stringify({
             success: true,
-            data: result.data,
+            total_results: result.data?.total_results,
+            results: result.data?.results,
           }),
         },
       ],

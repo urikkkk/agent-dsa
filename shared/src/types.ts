@@ -393,36 +393,63 @@ export interface AuditEvent {
 
 // --- Nimble API types ---
 
+export interface NimbleAgentRunParams {
+  agent_name: string;
+  params: Record<string, unknown>;
+}
+
 export interface NimbleSearchAgentParams {
-  template_id: number;
-  query: string;
+  agent_name: string;
+  keyword: string;
   zip_code?: string;
-  country?: string;
-  num_results?: number;
-  parse?: boolean;
 }
 
 export interface NimblePdpAgentParams {
-  template_id: number;
-  url: string;
+  agent_name: string;
+  product_id: string;
   zip_code?: string;
-  country?: string;
-  parse?: boolean;
 }
 
 export interface NimbleWebSearchParams {
   query: string;
-  focus?: 'general' | 'shopping' | 'news';
+  focus?: 'general' | 'shopping' | 'news' | 'geo' | 'social';
   max_results?: number;
   include_domains?: string[];
+  exclude_domains?: string[];
+  deep_search?: boolean;
+  country?: string;
 }
 
 export interface NimbleUrlExtractParams {
   url: string;
+  output_format?: 'html' | 'markdown' | 'simplified_html';
   render?: boolean;
-  content_type?: 'html' | 'markdown' | 'text';
+  driver?: string;
+  country?: string;
 }
 
+export interface NimbleAgentRunResponse<T = unknown> {
+  url: string;
+  task_id: string;
+  status: string;
+  data: T;
+}
+
+export interface NimbleSearchResponse<T = unknown> {
+  total_results: number;
+  results: T[];
+  request_id?: string;
+}
+
+export interface NimbleExtractResponse {
+  content: string;
+  title: string;
+  description: string;
+  url: string;
+  metadata?: Record<string, unknown>;
+}
+
+/** @deprecated Use NimbleAgentRunResponse or NimbleSearchResponse */
 export interface NimbleApiResponse<T = unknown> {
   status: string;
   data: T;

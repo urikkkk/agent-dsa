@@ -3,12 +3,19 @@ import type {
   NimblePdpAgentParams,
   NimbleWebSearchParams,
   NimbleUrlExtractParams,
-  NimbleApiResponse,
+  NimbleAgentRunResponse,
+  NimbleSearchResponse,
+  NimbleExtractResponse,
 } from '@agent-dsa/shared';
 
 const NIMBLE_BASE_URL =
-  process.env.NIMBLE_API_BASE_URL || 'https://api.nimbleway.com';
+  process.env.NIMBLE_API_BASE_URL || 'https://sdk.nimbleway.com';
 const NIMBLE_API_KEY = process.env.NIMBLE_API_KEY || '';
+
+// WSA agents can take 30-120s to scrape real websites
+const WSA_TIMEOUT = 120_000;
+const SEARCH_TIMEOUT = 60_000;
+const EXTRACT_TIMEOUT = 60_000;
 const DEFAULT_TIMEOUT = 30_000;
 
 export class NimbleClient {
@@ -21,95 +28,138 @@ export class NimbleClient {
   }
 
   private async request<T>(
+    method: string,
     endpoint: string,
     body: Record<string, unknown>,
     timeoutMs = DEFAULT_TIMEOUT
-  ): Promise<NimbleApiResponse<T>> {
+  ): Promise<T> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
 
     try {
       const response = await fetch(`${this.baseUrl}${endpoint}`, {
-        method: 'POST',
+        method,
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${this.apiKey}`,
+          Accept: 'application/json',
         },
         body: JSON.stringify(body),
         signal: controller.signal,
       });
 
       if (!response.ok) {
+        const text = await response.text().catch(() => '');
         throw new NimbleApiError(
           response.status,
           `Nimble API error: ${response.status} ${response.statusText}`,
-          await response.text().catch(() => '')
+          text
         );
       }
 
-      return (await response.json()) as NimbleApiResponse<T>;
+      return (await response.json()) as T;
     } finally {
       clearTimeout(timer);
     }
   }
 
+  /**
+   * Run a WSA agent (SERP or PDP) via /v1/agents/run.
+   * The API blocks until the agent finishes scraping (can take 10-120s).
+   */
+  async runAgent<T = unknown>(
+    agentName: string,
+    params: Record<string, unknown>
+  ): Promise<NimbleAgentRunResponse<T>> {
+    return this.request<NimbleAgentRunResponse<T>>(
+      'POST',
+      '/v1/agents/run',
+      { agent: agentName, params },
+      WSA_TIMEOUT
+    );
+  }
+
   async runSearchAgent<T = unknown>(
     params: NimbleSearchAgentParams
-  ): Promise<NimbleApiResponse<T>> {
-    return this.request<T>('/api/v1/search', {
-      template_id: params.template_id,
-      query: params.query,
-      zip_code: params.zip_code,
-      country: params.country || 'US',
-      num_results: params.num_results || 30,
-      parse: params.parse ?? true,
-    });
+  ): Promise<NimbleAgentRunResponse<T>> {
+    const agentParams: Record<string, unknown> = {
+      keyword: params.keyword,
+    };
+    if (params.zip_code) {
+      // Amazon uses zip_code, Walmart uses zipcode
+      agentParams.zip_code = params.zip_code;
+      agentParams.zipcode = params.zip_code;
+    }
+    return this.runAgent<T>(params.agent_name, agentParams);
   }
 
   async runPdpAgent<T = unknown>(
     params: NimblePdpAgentParams
-  ): Promise<NimbleApiResponse<T>> {
-    return this.request<T>('/api/v1/product', {
-      template_id: params.template_id,
-      url: params.url,
-      zip_code: params.zip_code,
-      country: params.country || 'US',
-      parse: params.parse ?? true,
-    });
+  ): Promise<NimbleAgentRunResponse<T>> {
+    const agentParams: Record<string, unknown> = {};
+    // Amazon PDP uses "asin", Walmart PDP uses "product_id"
+    if (params.agent_name.includes('amazon')) {
+      agentParams.asin = params.product_id;
+    } else {
+      agentParams.product_id = params.product_id;
+    }
+    if (params.zip_code) {
+      agentParams.zip_code = params.zip_code;
+      agentParams.zipcode = params.zip_code;
+    }
+    return this.runAgent<T>(params.agent_name, agentParams);
   }
 
   async webSearch<T = unknown>(
     params: NimbleWebSearchParams
-  ): Promise<NimbleApiResponse<T>> {
-    return this.request<T>('/api/v1/web/search', {
+  ): Promise<NimbleSearchResponse<T>> {
+    const body: Record<string, unknown> = {
       query: params.query,
       focus: params.focus || 'general',
       max_results: params.max_results || 10,
-      include_domains: params.include_domains,
-    });
-  }
+    };
+    if (params.include_domains) body.include_domains = params.include_domains;
+    if (params.exclude_domains) body.exclude_domains = params.exclude_domains;
+    if (params.deep_search !== undefined) body.deep_search = params.deep_search;
+    if (params.country) body.country = params.country;
 
-  async urlExtract<T = unknown>(
-    params: NimbleUrlExtractParams
-  ): Promise<NimbleApiResponse<T>> {
-    return this.request<T>(
-      '/api/v1/web/extract',
-      {
-        url: params.url,
-        render: params.render ?? false,
-        content_type: params.content_type || 'markdown',
-      },
-      45_000
+    return this.request<NimbleSearchResponse<T>>(
+      'POST',
+      '/v1/search',
+      body,
+      SEARCH_TIMEOUT
     );
   }
 
-  async listAgents(): Promise<NimbleApiResponse<unknown[]>> {
+  async urlExtract(
+    params: NimbleUrlExtractParams
+  ): Promise<NimbleExtractResponse> {
+    const body: Record<string, unknown> = {
+      url: params.url,
+      formats: [params.output_format || 'markdown'],
+    };
+    if (params.render) body.render = params.render;
+    if (params.driver) body.driver = params.driver;
+    if (params.country) body.country = params.country;
+
+    return this.request<NimbleExtractResponse>(
+      'POST',
+      '/v1/extract',
+      body,
+      EXTRACT_TIMEOUT
+    );
+  }
+
+  async listAgents(): Promise<unknown[]> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT);
     try {
-      const response = await fetch(`${this.baseUrl}/api/v1/agents`, {
+      const response = await fetch(`${this.baseUrl}/v1/agents/list`, {
         method: 'GET',
-        headers: { Authorization: `Bearer ${this.apiKey}` },
+        headers: {
+          Authorization: `Bearer ${this.apiKey}`,
+          Accept: 'application/json',
+        },
         signal: controller.signal,
       });
       if (!response.ok) {
@@ -119,7 +169,36 @@ export class NimbleClient {
           ''
         );
       }
-      return (await response.json()) as NimbleApiResponse<unknown[]>;
+      const data = await response.json();
+      return Array.isArray(data) ? data : (data as Record<string, unknown>).templates as unknown[] || [];
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async getAgent(agentName: string): Promise<Record<string, unknown>> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT);
+    try {
+      const response = await fetch(
+        `${this.baseUrl}/v1/agents/get?template_name=${encodeURIComponent(agentName)}`,
+        {
+          method: 'GET',
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`,
+            Accept: 'application/json',
+          },
+          signal: controller.signal,
+        }
+      );
+      if (!response.ok) {
+        throw new NimbleApiError(
+          response.status,
+          `Nimble API error: ${response.status}`,
+          ''
+        );
+      }
+      return (await response.json()) as Record<string, unknown>;
     } finally {
       clearTimeout(timer);
     }

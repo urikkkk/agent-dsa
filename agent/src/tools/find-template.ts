@@ -5,7 +5,7 @@ import { getNimbleClient } from '../lib/nimble-client.js';
 
 export const findTemplateTool = tool(
   'find_wsa_template',
-  'Discover available Nimble WSA templates for a retailer. Checks our database first, then falls back to the Nimble API. Returns template IDs for SERP and PDP agents.',
+  'Discover available Nimble WSA agents for a retailer. Checks our database first, then falls back to the Nimble API. Returns agent names for SERP and PDP agents that can be used with serp_search and pdp_fetch.',
   {
     domain: z
       .string()
@@ -28,7 +28,7 @@ export const findTemplateTool = tool(
     if (!args.refresh) {
       let query = db.from('nimble_agents').select('*');
       if (args.domain) {
-        query = query.eq('domain', args.domain);
+        query = query.ilike('domain', `%${args.domain}%`);
       }
       if (args.retailer_name) {
         query = query.ilike('name', `%${args.retailer_name}%`);
@@ -52,8 +52,8 @@ export const findTemplateTool = tool(
                 success: true,
                 source: 'database',
                 agents: agents.map((a) => ({
+                  agent_name: a.name,
                   template_id: a.template_id,
-                  name: a.name,
                   domain: a.domain,
                   entity_type: a.entity_type,
                   is_healthy: a.is_healthy,
@@ -69,8 +69,7 @@ export const findTemplateTool = tool(
     // Fallback: query Nimble API
     try {
       const nimble = getNimbleClient();
-      const response = await nimble.listAgents();
-      const agents = Array.isArray(response.data) ? response.data : [];
+      const agents = await nimble.listAgents();
 
       // Filter if domain provided
       const filtered = args.domain
@@ -88,7 +87,7 @@ export const findTemplateTool = tool(
               success: true,
               source: 'nimble_api',
               agents: filtered,
-              note: 'These are live templates from Nimble. Use template_id with serp_search or pdp_fetch.',
+              note: 'These are live templates from Nimble. Use the agent name with serp_search or pdp_fetch.',
             }),
           },
         ],

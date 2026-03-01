@@ -7,10 +7,10 @@ import { getSupabase } from '../lib/supabase.js';
 
 export const pdpFetchTool = tool(
   'pdp_fetch',
-  'Fetch a product detail page (PDP) using a Nimble WSA template. Returns detailed product info: price, size, availability, rating. Use this after getting URLs from SERP search.',
+  'Fetch a product detail page (PDP) using a Nimble WSA agent. Returns detailed product info: price, size, availability, rating. Use after getting product IDs from SERP search. The agent_name should match the retailer (e.g., "amazon_pdp", "walmart_pdp").',
   {
-    template_id: z.number().describe('Nimble WSA template ID for the retailer PDP agent'),
-    url: z.string().describe('Product URL to fetch'),
+    agent_name: z.string().describe('Nimble WSA agent name for the retailer PDP (e.g., "amazon_pdp", "walmart_pdp")'),
+    product_id: z.string().describe('Product identifier (ASIN for Amazon, product_id for Walmart, SKU for others)'),
     zip_code: z.string().optional().describe('ZIP code for location-specific pricing'),
     run_id: z.string().optional().describe('Run ID for logging'),
     retailer_id: z.string().optional().describe('Retailer UUID for logging'),
@@ -28,11 +28,10 @@ export const pdpFetchTool = tool(
         .insert({
           run_id: args.run_id,
           retailer_id: args.retailer_id,
-          agent_template_id: args.template_id,
           collection_tier: 'wsa',
           request_payload: {
-            template_id: args.template_id,
-            url: args.url,
+            agent_name: args.agent_name,
+            product_id: args.product_id,
             zip_code: args.zip_code,
           },
         })
@@ -44,11 +43,11 @@ export const pdpFetchTool = tool(
     const result = await withRetry(
       () =>
         nimble.runPdpAgent({
-          template_id: args.template_id,
-          url: args.url,
+          agent_name: args.agent_name,
+          product_id: args.product_id,
           zip_code: args.zip_code,
         }),
-      { maxAttempts: 3 }
+      { maxAttempts: 2, baseDelayMs: 3000, maxDelayMs: 15000 }
     );
 
     const latencyMs = Date.now() - startTime;
@@ -76,16 +75,21 @@ export const pdpFetchTool = tool(
       };
     }
 
-    const rawData = (result.data as unknown as Record<string, unknown>)?.data ?? result.data;
-    const pdp = parsePdpResult(rawData);
+    // WSA response has data with parsed fields
+    const responseData = result.data as unknown as Record<string, unknown>;
+    const rawData = responseData?.data as Record<string, unknown>;
+    // PDP agents return parsed_items as an array with one item
+    const parsedItems = (rawData?.parsed_items as unknown[]) || [];
+    const pdpData = parsedItems.length > 0 ? parsedItems[0] : rawData;
+
+    const pdp = parsePdpResult(pdpData);
 
     // Log response
     if (requestId) {
-      const payload = JSON.stringify(result.data);
       await db.from('nimble_responses').insert({
         nimble_request_id: requestId,
-        raw_payload: result.data as unknown as Record<string, unknown>,
-        payload_size_bytes: payload.length,
+        raw_payload: { task_id: responseData?.task_id, url: responseData?.url },
+        payload_size_bytes: JSON.stringify(responseData).length,
         parsing_summary: {
           has_price: pdp?.price != null && pdp.price > 0,
           has_size: !!pdp?.size_raw,
@@ -104,14 +108,14 @@ export const pdpFetchTool = tool(
             text: JSON.stringify({
               success: false,
               error: 'Failed to parse PDP data',
-              raw: rawData,
+              raw: pdpData,
             }),
           },
         ],
       };
     }
 
-    const product = pdpToProduct(pdp, args.url);
+    const product = pdpToProduct(pdp, String(responseData?.url || ''), args.product_id);
 
     return {
       content: [

@@ -34,34 +34,34 @@ INSERT INTO question_templates (type, name, prompt_template, description, defaul
    'Discovers active promotions for a product category at a retailer.',
    '{"include_sponsored": false}'::jsonb);
 
--- Nimble WSA agents (known templates)
+-- Nimble WSA agents (real template IDs from Nimble API)
 INSERT INTO nimble_agents (template_id, name, domain, entity_type, capabilities) VALUES
-  (649, 'Walmart SERP', 'walmart.com', 'serp', '{"supports_zip": true, "supports_query": true}'::jsonb),
-  (650, 'Walmart PDP', 'walmart.com', 'pdp', '{"supports_zip": true, "supports_url": true}'::jsonb),
-  (651, 'Amazon SERP', 'amazon.com', 'serp', '{"supports_zip": true, "supports_query": true}'::jsonb),
-  (652, 'Amazon PDP', 'amazon.com', 'pdp', '{"supports_zip": false, "supports_url": true}'::jsonb),
-  (661, 'Target SERP', 'target.com', 'serp', '{"supports_zip": true, "supports_query": true}'::jsonb),
-  (662, 'Target PDP', 'target.com', 'pdp', '{"supports_zip": true, "supports_url": true}'::jsonb),
-  (667, 'Kroger SERP', 'kroger.com', 'serp', '{"supports_zip": true, "supports_query": true}'::jsonb),
-  (668, 'Kroger PDP', 'kroger.com', 'pdp', '{"supports_zip": true, "supports_url": true}'::jsonb);
+  (2627, 'walmart_serp', 'www.walmart.com', 'serp', '{"supports_zip": true, "input_param": "keyword", "zip_param": "zipcode"}'::jsonb),
+  (2411, 'walmart_pdp', 'www.walmart.com', 'pdp', '{"supports_zip": true, "input_param": "product_id", "zip_param": "zipcode"}'::jsonb),
+  (2196, 'amazon_serp', 'www.amazon.com', 'serp', '{"supports_zip": true, "input_param": "keyword", "zip_param": "zip_code"}'::jsonb),
+  (2414, 'amazon_pdp', 'www.amazon.com', 'pdp', '{"supports_zip": true, "input_param": "asin", "zip_param": "zip_code"}'::jsonb),
+  (2068, 'target_serp', 'www.target.com', 'serp', '{"supports_zip": true, "input_param": "keyword"}'::jsonb),
+  (2702, 'target_pdp', 'www.target.com', 'pdp', '{"supports_zip": true, "input_param": "product_id"}'::jsonb),
+  (1991, 'kroger_serp', 'www.kroger.com', 'serp', '{"supports_zip": true, "input_param": "keyword"}'::jsonb),
+  (2100, 'kroger_pdp', 'www.kroger.com', 'pdp', '{"supports_zip": true, "input_param": "product_id"}'::jsonb);
 
 -- Retailers (linked to agents)
 INSERT INTO retailers (name, domain, serp_agent_id, pdp_agent_id, supports_location) VALUES
   ('Walmart', 'walmart.com',
-    (SELECT id FROM nimble_agents WHERE template_id = 649),
-    (SELECT id FROM nimble_agents WHERE template_id = 650),
+    (SELECT id FROM nimble_agents WHERE name = 'walmart_serp'),
+    (SELECT id FROM nimble_agents WHERE name = 'walmart_pdp'),
     true),
   ('Amazon', 'amazon.com',
-    (SELECT id FROM nimble_agents WHERE template_id = 651),
-    (SELECT id FROM nimble_agents WHERE template_id = 652),
+    (SELECT id FROM nimble_agents WHERE name = 'amazon_serp'),
+    (SELECT id FROM nimble_agents WHERE name = 'amazon_pdp'),
     true),
   ('Target', 'target.com',
-    (SELECT id FROM nimble_agents WHERE template_id = 661),
-    (SELECT id FROM nimble_agents WHERE template_id = 662),
+    (SELECT id FROM nimble_agents WHERE name = 'target_serp'),
+    (SELECT id FROM nimble_agents WHERE name = 'target_pdp'),
     true),
   ('Kroger', 'kroger.com',
-    (SELECT id FROM nimble_agents WHERE template_id = 667),
-    (SELECT id FROM nimble_agents WHERE template_id = 668),
+    (SELECT id FROM nimble_agents WHERE name = 'kroger_serp'),
+    (SELECT id FROM nimble_agents WHERE name = 'kroger_pdp'),
     true);
 
 -- Sample locations

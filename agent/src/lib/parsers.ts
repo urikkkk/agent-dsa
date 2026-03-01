@@ -5,44 +5,102 @@ import type {
 } from '@agent-dsa/shared';
 import { parseSize, computeUnitPrice } from './normalize.js';
 
+/**
+ * Parse SERP results from Nimble WSA agent response.
+ * WSA agents return parsed_items with fields like:
+ * product_name, asin, price, rating, review_count, product_url, etc.
+ */
 export function parseSerpResults(rawData: unknown): NimbleSerpResult[] {
   if (!rawData || !Array.isArray(rawData)) return [];
   return rawData.map((item: Record<string, unknown>, index: number) => ({
-    rank: (item.rank as number) || index + 1,
-    title: String(item.title || item.name || ''),
-    url: String(item.url || item.link || ''),
-    price: item.price != null ? Number(item.price) : undefined,
+    rank: (item.position as number) || (item.rank as number) || index + 1,
+    title: String(item.product_name || item.title || item.name || ''),
+    url: String(item.product_url || item.url || item.link || ''),
+    price: item.price != null
+      ? Number(item.price)
+      : item.product_price != null
+        ? Number(item.product_price)
+        : undefined,
     is_sponsored: Boolean(item.is_sponsored || item.sponsored || item.is_ad),
-    badge: item.badge ? String(item.badge) : undefined,
-    retailer_product_id: item.product_id
-      ? String(item.product_id)
-      : undefined,
-    rating: item.rating != null ? Number(item.rating) : undefined,
-    review_count:
-      item.review_count != null ? Number(item.review_count) : undefined,
+    badge: item.badge
+      ? String(item.badge)
+      : item.amazons_choice
+        ? 'amazons_choice'
+        : undefined,
+    retailer_product_id: item.asin
+      ? String(item.asin)
+      : item.product_id
+        ? String(item.product_id)
+        : undefined,
+    rating: item.rating != null
+      ? Number(item.rating)
+      : item.product_rating != null
+        ? Number(item.product_rating)
+        : undefined,
+    review_count: item.review_count != null
+      ? Number(item.review_count)
+      : item.product_reviews_count != null
+        ? Number(item.product_reviews_count)
+        : undefined,
   }));
 }
 
+/**
+ * Parse PDP result from Nimble WSA agent response.
+ * Amazon PDP returns fields like: product_title, web_price, brand, availability, etc.
+ * Walmart PDP returns similar but with different field names.
+ */
 export function parsePdpResult(rawData: unknown): NimblePdpResult | null {
   if (!rawData || typeof rawData !== 'object') return null;
   const data = rawData as Record<string, unknown>;
   return {
-    title: String(data.title || data.name || ''),
+    title: String(data.product_title || data.title || data.name || ''),
     brand: data.brand ? String(data.brand) : undefined,
-    price: Number(data.price || data.shelf_price || 0),
+    price: Number(
+      data.web_price || data.price || data.shelf_price || data.product_price || 0
+    ),
     promo_price:
-      data.promo_price != null ? Number(data.promo_price) : undefined,
-    size_raw: data.size ? String(data.size) : undefined,
-    unit_price: data.unit_price != null ? Number(data.unit_price) : undefined,
+      data.promo_price != null
+        ? Number(data.promo_price)
+        : data.list_price != null && Number(data.list_price) > Number(data.web_price || data.price || 0)
+          ? Number(data.web_price || data.price)
+          : undefined,
+    size_raw: data.pack_size
+      ? String(data.pack_size)
+      : data.size
+        ? String(data.size)
+        : data.unit_of_measure
+          ? `${data.unit_of_measure_quantity || ''} ${data.unit_of_measure}`
+          : undefined,
+    unit_price: data.unit_price != null
+      ? Number(data.unit_price)
+      : data.price_per_unit != null
+        ? Number(data.price_per_unit)
+        : undefined,
     in_stock:
-      data.in_stock != null
-        ? Boolean(data.in_stock)
-        : data.availability !== 'out_of_stock',
-    rating: data.rating != null ? Number(data.rating) : undefined,
-    review_count:
-      data.review_count != null ? Number(data.review_count) : undefined,
+      data.availability != null
+        ? Boolean(data.availability)
+        : data.in_stock != null
+          ? Boolean(data.in_stock)
+          : data.product_out_of_stock != null
+            ? !Boolean(data.product_out_of_stock)
+            : true,
+    rating: data.average_of_reviews != null
+      ? Number(data.average_of_reviews)
+      : data.rating != null
+        ? Number(data.rating)
+        : data.product_rating != null
+          ? Number(data.product_rating)
+          : undefined,
+    review_count: data.number_of_reviews != null
+      ? Number(data.number_of_reviews)
+      : data.review_count != null
+        ? Number(data.review_count)
+        : data.product_reviews_count != null
+          ? Number(data.product_reviews_count)
+          : undefined,
     variants: Array.isArray(data.variants) ? data.variants : undefined,
-    url: String(data.url || ''),
+    url: String(data.product_url || data.url || ''),
   };
 }
 
