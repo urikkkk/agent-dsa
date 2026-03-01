@@ -3,7 +3,7 @@ import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { getNimbleClient } from '../lib/nimble-client.js';
 import { withRetry, isCircuitOpen } from '../lib/retry.js';
 import { parsePdpResult, pdpToProduct } from '../lib/parsers.js';
-import { getSupabase } from '../lib/supabase.js';
+import { getSupabase, withTimeout } from '../lib/supabase.js';
 import { generateTaskId, getAttemptNumber, emitLedgerEvent } from '../lib/ledger.js';
 
 export const pdpFetchTool = tool(
@@ -57,21 +57,29 @@ export const pdpFetchTool = tool(
     // Log request
     let requestId: string | undefined;
     if (args.run_id) {
-      const { data } = await db
-        .from('nimble_requests')
-        .insert({
-          run_id: args.run_id,
-          retailer_id: args.retailer_id,
-          collection_tier: 'wsa',
-          request_payload: {
-            agent_name: args.agent_name,
-            product_id: args.product_id,
-            zip_code: args.zip_code,
-          },
-        })
-        .select('id')
-        .single();
-      requestId = data?.id;
+      try {
+        const { data } = await withTimeout(
+          db
+            .from('nimble_requests')
+            .insert({
+              run_id: args.run_id,
+              retailer_id: args.retailer_id,
+              collection_tier: 'wsa',
+              request_payload: {
+                agent_name: args.agent_name,
+                product_id: args.product_id,
+                zip_code: args.zip_code,
+              },
+            })
+            .select('id')
+            .single(),
+          10_000,
+          'pdp_fetch: nimble_requests insert'
+        );
+        requestId = data?.id;
+      } catch (e) {
+        console.warn('[pdp_fetch] nimble_requests insert failed:', e instanceof Error ? e.message : e);
+      }
     }
 
     const result = await withRetry(
@@ -88,12 +96,20 @@ export const pdpFetchTool = tool(
 
     if (!result.success) {
       if (requestId) {
-        await db.from('nimble_responses').insert({
-          nimble_request_id: requestId,
-          http_status: 0,
-          latency_ms: latencyMs,
-          parsing_summary: { error: result.errors },
-        });
+        try {
+          await withTimeout(
+            db.from('nimble_responses').insert({
+              nimble_request_id: requestId,
+              http_status: 0,
+              latency_ms: latencyMs,
+              parsing_summary: { error: result.errors },
+            }),
+            10_000,
+            'pdp_fetch: nimble_responses failure insert'
+          );
+        } catch (e) {
+          console.warn('[pdp_fetch] nimble_responses failure insert failed:', e instanceof Error ? e.message : e);
+        }
       }
       return {
         content: [
@@ -120,18 +136,26 @@ export const pdpFetchTool = tool(
 
     // Log response
     if (requestId) {
-      await db.from('nimble_responses').insert({
-        nimble_request_id: requestId,
-        raw_payload: { task_id: responseData?.task_id, url: responseData?.url },
-        payload_size_bytes: JSON.stringify(responseData).length,
-        parsing_summary: {
-          has_price: pdp?.price != null && pdp.price > 0,
-          has_size: !!pdp?.size_raw,
-          in_stock: pdp?.in_stock,
-        },
-        http_status: 200,
-        latency_ms: latencyMs,
-      });
+      try {
+        await withTimeout(
+          db.from('nimble_responses').insert({
+            nimble_request_id: requestId,
+            raw_payload: { task_id: responseData?.task_id, url: responseData?.url },
+            payload_size_bytes: JSON.stringify(responseData).length,
+            parsing_summary: {
+              has_price: pdp?.price != null && pdp.price > 0,
+              has_size: !!pdp?.size_raw,
+              in_stock: pdp?.in_stock,
+            },
+            http_status: 200,
+            latency_ms: latencyMs,
+          }),
+          10_000,
+          'pdp_fetch: nimble_responses success insert'
+        );
+      } catch (e) {
+        console.warn('[pdp_fetch] nimble_responses success insert failed:', e instanceof Error ? e.message : e);
+      }
     }
 
     if (!pdp) {

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { normalizeUrl, extractRetailerProductId } from '../lib/normalize.js';
-import { getSupabase } from '../lib/supabase.js';
+import { getSupabase, withTimeout } from '../lib/supabase.js';
 
 // --- Pure dedup logic (reusable) ---
 
@@ -128,10 +128,14 @@ export const dedupAndWriteSerpCandidatesTool = tool(
       raw_payload: c.raw_payload,
     }));
 
-    const { data, error } = await db
-      .from('serp_candidates')
-      .insert(rows)
-      .select('id');
+    const { data, error } = await withTimeout(
+      db
+        .from('serp_candidates')
+        .insert(rows)
+        .select('id'),
+      15_000,
+      'dedup_and_write: serp_candidates insert'
+    );
 
     if (error) {
       return {

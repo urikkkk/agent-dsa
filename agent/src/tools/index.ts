@@ -13,6 +13,8 @@ import {
 import { dedupAndWriteSerpCandidatesTool } from './dedup.js';
 import { readObservationsTool } from './read-observations.js';
 import { readCandidatesTool } from './read-candidates.js';
+import { memorySearchTool } from './memory-search.js';
+import { memoryAddTool } from './memory-add.js';
 
 /**
  * WebOps: collection + writing observations/candidates.
@@ -46,6 +48,8 @@ export function createDsaAnalysisToolServer() {
       readObservationsTool,
       readCandidatesTool,
       writeAnswerTool,
+      memorySearchTool,
+      memoryAddTool,
     ],
   });
 }

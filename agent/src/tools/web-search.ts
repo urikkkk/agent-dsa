@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { getNimbleClient } from '../lib/nimble-client.js';
 import { withRetry, isCircuitOpen } from '../lib/retry.js';
-import { getSupabase } from '../lib/supabase.js';
+import { getSupabase, withTimeout } from '../lib/supabase.js';
 import { generateTaskId, getAttemptNumber, emitLedgerEvent } from '../lib/ledger.js';
 
 export const webSearchFallbackTool = tool(
@@ -68,35 +68,51 @@ export const webSearchFallbackTool = tool(
 
     let requestId: string | undefined;
     if (args.run_id) {
-      const { data } = await db
-        .from('nimble_requests')
-        .insert({
-          run_id: args.run_id,
-          retailer_id: args.retailer_id,
-          collection_tier: 'search_extract',
-          request_payload: {
-            query: args.query,
-            focus: args.focus,
-            max_results: args.max_results,
-            include_domains: args.include_domains,
-          },
-          keyword: args.query,
-        })
-        .select('id')
-        .single();
-      requestId = data?.id;
+      try {
+        const { data } = await withTimeout(
+          db
+            .from('nimble_requests')
+            .insert({
+              run_id: args.run_id,
+              retailer_id: args.retailer_id,
+              collection_tier: 'search_extract',
+              request_payload: {
+                query: args.query,
+                focus: args.focus,
+                max_results: args.max_results,
+                include_domains: args.include_domains,
+              },
+              keyword: args.query,
+            })
+            .select('id')
+            .single(),
+          10_000,
+          'web_search: nimble_requests insert'
+        );
+        requestId = data?.id;
+      } catch (e) {
+        console.warn('[web_search] nimble_requests insert failed:', e instanceof Error ? e.message : e);
+      }
     }
 
     // Log fallback event
     if (args.run_id) {
-      await db.from('fallback_events').insert({
-        run_id: args.run_id,
-        retailer_id: args.retailer_id,
-        keyword: args.query,
-        from_tier: 'wsa',
-        to_tier: 'search_extract',
-        trigger_reason: 'no_wsa_template_or_wsa_failure',
-      });
+      try {
+        await withTimeout(
+          db.from('fallback_events').insert({
+            run_id: args.run_id,
+            retailer_id: args.retailer_id,
+            keyword: args.query,
+            from_tier: 'wsa',
+            to_tier: 'search_extract',
+            trigger_reason: 'no_wsa_template_or_wsa_failure',
+          }),
+          10_000,
+          'web_search: fallback_events insert'
+        );
+      } catch (e) {
+        console.warn('[web_search] fallback_events insert failed:', e instanceof Error ? e.message : e);
+      }
     }
 
     const result = await withRetry(
@@ -114,17 +130,25 @@ export const webSearchFallbackTool = tool(
     const latencyMs = Date.now() - startTime;
 
     if (requestId) {
-      await db.from('nimble_responses').insert({
-        nimble_request_id: requestId,
-        raw_payload: result.success
-          ? { total_results: result.data?.total_results, request_id: result.data?.request_id }
-          : null,
-        http_status: result.success ? 200 : 0,
-        latency_ms: latencyMs,
-        parsing_summary: result.success
-          ? { source: 'web_search', result_count: result.data?.total_results }
-          : { error: result.errors },
-      });
+      try {
+        await withTimeout(
+          db.from('nimble_responses').insert({
+            nimble_request_id: requestId,
+            raw_payload: result.success
+              ? { total_results: result.data?.total_results, request_id: result.data?.request_id }
+              : null,
+            http_status: result.success ? 200 : 0,
+            latency_ms: latencyMs,
+            parsing_summary: result.success
+              ? { source: 'web_search', result_count: result.data?.total_results }
+              : { error: result.errors },
+          }),
+          10_000,
+          'web_search: nimble_responses insert'
+        );
+      } catch (e) {
+        console.warn('[web_search] nimble_responses insert failed:', e instanceof Error ? e.message : e);
+      }
     }
 
     if (!result.success) {

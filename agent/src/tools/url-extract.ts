@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { getNimbleClient } from '../lib/nimble-client.js';
 import { withRetry, isCircuitOpen } from '../lib/retry.js';
-import { getSupabase } from '../lib/supabase.js';
+import { getSupabase, withTimeout } from '../lib/supabase.js';
 import { generateTaskId, getAttemptNumber, emitLedgerEvent } from '../lib/ledger.js';
 
 export const urlExtractFallbackTool = tool(
@@ -58,21 +58,29 @@ export const urlExtractFallbackTool = tool(
 
     let requestId: string | undefined;
     if (args.run_id) {
-      const { data } = await db
-        .from('nimble_requests')
-        .insert({
-          run_id: args.run_id,
-          retailer_id: args.retailer_id,
-          collection_tier: 'search_extract',
-          request_payload: {
-            url: args.url,
-            output_format: args.output_format,
-            render: args.render,
-          },
-        })
-        .select('id')
-        .single();
-      requestId = data?.id;
+      try {
+        const { data } = await withTimeout(
+          db
+            .from('nimble_requests')
+            .insert({
+              run_id: args.run_id,
+              retailer_id: args.retailer_id,
+              collection_tier: 'search_extract',
+              request_payload: {
+                url: args.url,
+                output_format: args.output_format,
+                render: args.render,
+              },
+            })
+            .select('id')
+            .single(),
+          10_000,
+          'url_extract: nimble_requests insert'
+        );
+        requestId = data?.id;
+      } catch (e) {
+        console.warn('[url_extract] nimble_requests insert failed:', e instanceof Error ? e.message : e);
+      }
     }
 
     const result = await withRetry(
@@ -88,16 +96,24 @@ export const urlExtractFallbackTool = tool(
     const latencyMs = Date.now() - startTime;
 
     if (requestId) {
-      const payload = result.success ? JSON.stringify(result.data) : '';
-      await db.from('nimble_responses').insert({
-        nimble_request_id: requestId,
-        raw_payload: result.success
-          ? { title: result.data?.title, url: result.data?.url }
-          : null,
-        payload_size_bytes: payload.length,
-        http_status: result.success ? 200 : 0,
-        latency_ms: latencyMs,
-      });
+      try {
+        const payload = result.success ? JSON.stringify(result.data) : '';
+        await withTimeout(
+          db.from('nimble_responses').insert({
+            nimble_request_id: requestId,
+            raw_payload: result.success
+              ? { title: result.data?.title, url: result.data?.url }
+              : null,
+            payload_size_bytes: payload.length,
+            http_status: result.success ? 200 : 0,
+            latency_ms: latencyMs,
+          }),
+          10_000,
+          'url_extract: nimble_responses insert'
+        );
+      } catch (e) {
+        console.warn('[url_extract] nimble_responses insert failed:', e instanceof Error ? e.message : e);
+      }
     }
 
     if (!result.success) {

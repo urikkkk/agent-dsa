@@ -20,11 +20,11 @@ export function buildDsaPrompt(
   priorKnowledge?: string
 ): string {
   const locationInfo = ctx.location
-    ? `Location: ${ctx.location.city}, ${ctx.location.state} (ZIP codes: ${ctx.location.zip_codes.join(', ')})`
+    ? `Location: ${ctx.location.city}, ${ctx.location.state} (ZIP codes: ${ctx.location.zip_codes.join(', ')}) location_id="${ctx.location.id}"`
     : 'No specific location set.';
 
   const retailerNames = ctx.retailers
-    .map((r) => `- ${r.name} (${r.domain})`)
+    .map((r) => `- ${r.name} (${r.domain}) retailer_id="${r.id}"`)
     .join('\n');
 
   // Load analysis-relevant skills

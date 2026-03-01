@@ -9,7 +9,7 @@ interface WebOpsPromptContext {
 
 export function buildWebOpsPrompt(ctx: WebOpsPromptContext): string {
   const locationInfo = ctx.location
-    ? `Location: ${ctx.location.city}, ${ctx.location.state} (ZIP codes: ${ctx.location.zip_codes.join(', ')})`
+    ? `Location: ${ctx.location.city}, ${ctx.location.state} (ZIP codes: ${ctx.location.zip_codes.join(', ')}) location_id="${ctx.location.id}"`
     : 'No specific location set.';
 
   const retailerInfo = ctx.retailers
@@ -20,7 +20,7 @@ export function buildWebOpsPrompt(ctx: WebOpsPromptContext): string {
       const pdpAgent = r.pdp_agent
         ? `PDP agent_name="${r.pdp_agent.name}"`
         : 'No PDP agent (use url_extract_fallback)';
-      return `- ${r.name} (${r.domain}): ${serpAgent}, ${pdpAgent}, supports_location=${r.supports_location}`;
+      return `- ${r.name} (${r.domain}) retailer_id="${r.id}": ${serpAgent}, ${pdpAgent}, supports_location=${r.supports_location}`;
     })
     .join('\n');
 

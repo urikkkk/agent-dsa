@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { tool } from '@anthropic-ai/claude-agent-sdk';
-import { getSupabase } from '../lib/supabase.js';
+import { getSupabase, withTimeout } from '../lib/supabase.js';
 
 export const readObservationsTool = tool(
   'read_observations',
@@ -22,7 +22,7 @@ export const readObservationsTool = tool(
       q = q.eq('retailer_id', args.retailer_id);
     }
 
-    const { data, error } = await q;
+    const { data, error } = await withTimeout(q, 15_000, 'read_observations: observations query');
 
     if (error) {
       return {

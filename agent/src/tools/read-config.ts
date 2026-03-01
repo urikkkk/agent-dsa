@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { tool } from '@anthropic-ai/claude-agent-sdk';
-import { getSupabase } from '../lib/supabase.js';
+import { getSupabase, withTimeout } from '../lib/supabase.js';
 
 export const readConfigTool = tool(
   'read_config',
@@ -41,11 +41,15 @@ export const readConfigTool = tool(
     let error: any;
 
     if (args.id) {
-      const result = await db
-        .from(args.table)
-        .select(args.select)
-        .eq('id', args.id)
-        .single();
+      const result = await withTimeout(
+        db
+          .from(args.table)
+          .select(args.select)
+          .eq('id', args.id)
+          .single(),
+        15_000,
+        `read_config: ${args.table} single-by-id`
+      );
       data = result.data;
       error = result.error;
     } else {
@@ -57,7 +61,11 @@ export const readConfigTool = tool(
           }
         }
       }
-      const result = await q.limit(args.limit);
+      const result = await withTimeout(
+        q.limit(args.limit),
+        15_000,
+        `read_config: ${args.table} list`
+      );
       data = result.data;
       error = result.error;
     }

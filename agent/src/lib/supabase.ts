@@ -23,7 +23,7 @@ export function getSupabase(): SupabaseClient {
  * Use for critical Supabase operations that should not hang indefinitely.
  */
 export async function withTimeout<T>(
-  promise: Promise<T>,
+  promise: PromiseLike<T>,
   ms = 15_000,
   label = 'Supabase operation'
 ): Promise<T> {
@@ -32,7 +32,7 @@ export async function withTimeout<T>(
     timer = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
   });
   try {
-    return await Promise.race([promise, timeout]);
+    return await Promise.race([Promise.resolve(promise), timeout]);
   } finally {
     clearTimeout(timer!);
   }

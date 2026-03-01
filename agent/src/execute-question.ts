@@ -155,6 +155,15 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
 
     const webOpsTools = createWebOpsToolServer();
     let webOpsTurnCounter = 0;
+    let webOpsConsecutiveTextOnlyTurns = 0;
+
+    // ── Phase timeout via AbortController ──
+    const webOpsTimeoutMs = parseInt(process.env.WEBOPS_TIMEOUT_MS || '600000', 10);
+    const webOpsAbort = new AbortController();
+    const webOpsTimer = setTimeout(() => {
+      console.warn(`[webops] Phase timeout reached (${webOpsTimeoutMs}ms), aborting`);
+      webOpsAbort.abort();
+    }, webOpsTimeoutMs);
 
     for await (const message of query({
       prompt: webOpsUserPrompt,
@@ -166,6 +175,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         mcpServers: { 'webops-tools': webOpsTools },
+        abortController: webOpsAbort,
         hooks: {
           PostToolUse: [{ hooks: [webOpsHook] }],
         },
@@ -207,6 +217,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
           .filter((c) => c.type === 'tool_use')
           .map((c) => c.name as string);
         if (toolUses.length > 0) {
+          webOpsConsecutiveTextOnlyTurns = 0;
           for (const tool of toolUses) {
             eventBus?.send({
               event_type: 'task_started',
@@ -217,11 +228,17 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
             });
           }
         } else {
+          webOpsConsecutiveTextOnlyTurns++;
           const textContent = content
             .filter((c) => c.type === 'text')
             .map((c) => String(c.text ?? '').slice(0, 200))
             .join(' ');
-          console.warn(`[webops] WARNING: text-only turn ${webOpsTurnCounter} (no tool calls): ${textContent}`);
+          console.warn(`[webops] WARNING: text-only turn ${webOpsTurnCounter} (${webOpsConsecutiveTextOnlyTurns} consecutive, no tool calls): ${textContent}`);
+          if (webOpsConsecutiveTextOnlyTurns >= 2) {
+            console.warn(`[webops] Aborting: ${webOpsConsecutiveTextOnlyTurns} consecutive text-only turns`);
+            webOpsAbort.abort();
+            break;
+          }
         }
       }
 
@@ -248,6 +265,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
         }
       }
     }
+    clearTimeout(webOpsTimer);
 
     // ── WebOps step summary ───────────────────────────────────────────
     const webOpsTimedOut = await resolveStuckTasks(runId, 'webops', 'collection');
@@ -353,6 +371,15 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
 
     const dsaTools = createDsaAnalysisToolServer();
     let dsaTurnCounter = 0;
+    let dsaConsecutiveTextOnlyTurns = 0;
+
+    // ── Phase timeout via AbortController ──
+    const dsaTimeoutMs = parseInt(process.env.DSA_TIMEOUT_MS || '300000', 10);
+    const dsaAbort = new AbortController();
+    const dsaTimer = setTimeout(() => {
+      console.warn(`[dsa] Phase timeout reached (${dsaTimeoutMs}ms), aborting`);
+      dsaAbort.abort();
+    }, dsaTimeoutMs);
 
     for await (const message of query({
       prompt: dsaUserPrompt,
@@ -364,6 +391,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
         mcpServers: { 'dsa-tools': dsaTools },
+        abortController: dsaAbort,
         hooks: {
           PostToolUse: [{ hooks: [dsaHook] }],
         },
@@ -405,6 +433,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
           .filter((c) => c.type === 'tool_use')
           .map((c) => c.name as string);
         if (toolUses.length > 0) {
+          dsaConsecutiveTextOnlyTurns = 0;
           for (const tool of toolUses) {
             eventBus?.send({
               event_type: 'task_started',
@@ -415,11 +444,17 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
             });
           }
         } else {
+          dsaConsecutiveTextOnlyTurns++;
           const textContent = content
             .filter((c) => c.type === 'text')
             .map((c) => String(c.text ?? '').slice(0, 200))
             .join(' ');
-          console.warn(`[dsa] WARNING: text-only turn ${dsaTurnCounter} (no tool calls): ${textContent}`);
+          console.warn(`[dsa] WARNING: text-only turn ${dsaTurnCounter} (${dsaConsecutiveTextOnlyTurns} consecutive, no tool calls): ${textContent}`);
+          if (dsaConsecutiveTextOnlyTurns >= 2) {
+            console.warn(`[dsa] Aborting: ${dsaConsecutiveTextOnlyTurns} consecutive text-only turns`);
+            dsaAbort.abort();
+            break;
+          }
         }
       }
 
@@ -446,6 +481,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
         }
       }
     }
+    clearTimeout(dsaTimer);
 
     // ── DSA step summary ──────────────────────────────────────────────
     const dsaTimedOut = await resolveStuckTasks(runId, 'dsa', 'analysis');

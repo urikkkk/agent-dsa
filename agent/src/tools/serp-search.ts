@@ -4,7 +4,7 @@ import { getNimbleClient } from '../lib/nimble-client.js';
 import { withRetry } from '../lib/retry.js';
 import { isCircuitOpen } from '../lib/retry.js';
 import { parseSerpResults } from '../lib/parsers.js';
-import { getSupabase } from '../lib/supabase.js';
+import { getSupabase, withTimeout } from '../lib/supabase.js';
 import { generateTaskId, getAttemptNumber, emitLedgerEvent } from '../lib/ledger.js';
 
 export const serpSearchTool = tool(
@@ -58,25 +58,34 @@ export const serpSearchTool = tool(
     // Log the request
     let requestId: string | undefined;
     if (args.run_id) {
-      const { data } = await db
-        .from('nimble_requests')
-        .insert({
-          run_id: args.run_id,
-          retailer_id: args.retailer_id,
-          collection_tier: 'wsa',
-          request_payload: {
-            agent_name: args.agent_name,
-            keyword: args.keyword,
-            zip_code: args.zip_code,
-          },
-          keyword: args.keyword,
-          location_context: args.zip_code ? { zip_code: args.zip_code } : null,
-        })
-        .select('id')
-        .single();
-      requestId = data?.id;
+      try {
+        const { data } = await withTimeout(
+          db
+            .from('nimble_requests')
+            .insert({
+              run_id: args.run_id,
+              retailer_id: args.retailer_id,
+              collection_tier: 'wsa',
+              request_payload: {
+                agent_name: args.agent_name,
+                keyword: args.keyword,
+                zip_code: args.zip_code,
+              },
+              keyword: args.keyword,
+              location_context: args.zip_code ? { zip_code: args.zip_code } : null,
+            })
+            .select('id')
+            .single(),
+          10_000,
+          'serp_search: nimble_requests insert'
+        );
+        requestId = data?.id;
+      } catch (e) {
+        console.warn('[serp_search] nimble_requests insert failed:', e instanceof Error ? e.message : e);
+      }
     }
 
+    console.log(`[serp_search] calling Nimble: agent=${args.agent_name} keyword="${args.keyword}" zip=${args.zip_code}`);
     const result = await withRetry(
       () =>
         nimble.runSearchAgent({
@@ -88,16 +97,25 @@ export const serpSearchTool = tool(
     );
 
     const latencyMs = Date.now() - startTime;
+    console.log(`[serp_search] Nimble result: success=${result.success} attempts=${result.attempts} latency=${latencyMs}ms`);
 
     if (!result.success) {
       // Log failure
       if (requestId) {
-        await db.from('nimble_responses').insert({
-          nimble_request_id: requestId,
-          http_status: 0,
-          latency_ms: latencyMs,
-          parsing_summary: { error: result.errors },
-        });
+        try {
+          await withTimeout(
+            db.from('nimble_responses').insert({
+              nimble_request_id: requestId,
+              http_status: 0,
+              latency_ms: latencyMs,
+              parsing_summary: { error: result.errors },
+            }),
+            10_000,
+            'serp_search: nimble_responses failure insert'
+          );
+        } catch (e) {
+          console.warn('[serp_search] nimble_responses failure insert failed:', e instanceof Error ? e.message : e);
+        }
       }
       return {
         content: [
@@ -122,14 +140,22 @@ export const serpSearchTool = tool(
 
     // Log response
     if (requestId) {
-      await db.from('nimble_responses').insert({
-        nimble_request_id: requestId,
-        raw_payload: { task_id: responseData?.task_id, url: responseData?.url, result_count: parsed.length },
-        payload_size_bytes: JSON.stringify(responseData).length,
-        parsing_summary: { result_count: parsed.length },
-        http_status: 200,
-        latency_ms: latencyMs,
-      });
+      try {
+        await withTimeout(
+          db.from('nimble_responses').insert({
+            nimble_request_id: requestId,
+            raw_payload: { task_id: responseData?.task_id, url: responseData?.url, result_count: parsed.length },
+            payload_size_bytes: JSON.stringify(responseData).length,
+            parsing_summary: { result_count: parsed.length },
+            http_status: 200,
+            latency_ms: latencyMs,
+          }),
+          10_000,
+          'serp_search: nimble_responses success insert'
+        );
+      } catch (e) {
+        console.warn('[serp_search] nimble_responses success insert failed:', e instanceof Error ? e.message : e);
+      }
     }
 
     return {

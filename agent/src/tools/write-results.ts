@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { tool } from '@anthropic-ai/claude-agent-sdk';
-import { getSupabase } from '../lib/supabase.js';
+import { getSupabase, withTimeout } from '../lib/supabase.js';
 import { runValidationChecks } from './validate.js';
 
 export const writeObservationTool = tool(
@@ -37,11 +37,15 @@ export const writeObservationTool = tool(
     // Look up retailer domain for URL validation
     let retailerDomain: string | undefined;
     if (args.retailer_id) {
-      const { data: retailer } = await db
-        .from('retailers')
-        .select('domain')
-        .eq('id', args.retailer_id)
-        .single();
+      const { data: retailer } = await withTimeout(
+        db
+          .from('retailers')
+          .select('domain')
+          .eq('id', args.retailer_id)
+          .single(),
+        15_000,
+        'write_observation: retailers lookup'
+      );
       retailerDomain = retailer?.domain as string | undefined;
     }
 
@@ -59,11 +63,27 @@ export const writeObservationTool = tool(
       confidence: args.confidence,
     });
 
+    // product_id must be a valid UUID (the column references products.id).
+    // The agent often passes retailer-specific IDs (e.g., Amazon ASINs like "B0D248DSKM").
+    // Store non-UUID values in ai_parsed_fields and set product_id to null.
+    const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+    let resolvedProductId: string | undefined = args.product_id;
+    let retailerProductId: string | undefined;
+    if (args.product_id && !UUID_RE.test(args.product_id)) {
+      retailerProductId = args.product_id;
+      resolvedProductId = undefined;
+    }
+
+    const aiParsedFields = {
+      ...(args.ai_parsed_fields ?? {}),
+      ...(retailerProductId ? { retailer_product_id: retailerProductId } : {}),
+    };
+
     const row = {
       run_id: args.run_id,
       retailer_id: args.retailer_id,
       location_id: args.location_id,
-      product_id: args.product_id,
+      product_id: resolvedProductId,
       product_match_id: args.product_match_id,
       shelf_price: args.shelf_price,
       promo_price: args.promo_price,
@@ -83,46 +103,30 @@ export const writeObservationTool = tool(
       validation_status: validation.validation_status,
       validation_reasons: validation.reasons,
       quality_score: validation.quality_score,
-      ai_parsed_fields: args.ai_parsed_fields,
+      ai_parsed_fields: Object.keys(aiParsedFields).length > 0 ? aiParsedFields : undefined,
       ai_confidence: args.ai_confidence,
       raw_payload: args.raw_payload,
     };
 
-    // Upsert: if a row for (run_id, retailer_id, product_id, location_id) exists, update it
-    const { data, error } = await db
-      .from('observations')
-      .upsert(row, { onConflict: 'run_id,retailer_id,product_id,location_id', ignoreDuplicates: false })
-      .select('id')
-      .single();
-
-    if (error) {
-      // Fall back to plain insert if upsert constraint doesn't exist yet
-      const { data: insertData, error: insertError } = await db
+    // Plain insert — the partial unique index (WHERE product_id IS NOT NULL) doesn't
+    // work with Supabase's upsert, so we use insert and handle duplicates gracefully.
+    const { data, error } = await withTimeout(
+      db
         .from('observations')
         .insert(row)
         .select('id')
-        .single();
+        .single(),
+      15_000,
+      'write_observation: observations insert'
+    );
 
-      if (insertError) {
-        return {
-          content: [
-            {
-              type: 'text' as const,
-              text: JSON.stringify({ success: false, error: insertError.message }),
-            },
-          ],
-        };
-      }
-
+    if (error) {
+      console.error(`[write_observation] insert failed: ${error.message} (${error.code}) | run_id=${args.run_id} retailer_id=${args.retailer_id} product_id=${resolvedProductId ?? 'null'} retailer_pid=${retailerProductId ?? 'none'}`);
       return {
         content: [
           {
             type: 'text' as const,
-            text: JSON.stringify({
-              success: true,
-              observation_id: insertData.id,
-              validation: validation,
-            }),
+            text: JSON.stringify({ success: false, error: error.message }),
           },
         ],
       };
@@ -136,6 +140,7 @@ export const writeObservationTool = tool(
             success: true,
             observation_id: data.id,
             validation: validation,
+            ...(retailerProductId ? { note: `Retailer product ID "${retailerProductId}" stored in ai_parsed_fields (not a UUID)` } : {}),
           }),
         },
       ],
@@ -178,10 +183,14 @@ export const writeSerpCandidatesTool = tool(
       raw_payload: c.raw_payload,
     }));
 
-    const { data, error } = await db
-      .from('serp_candidates')
-      .insert(rows)
-      .select('id');
+    const { data, error } = await withTimeout(
+      db
+        .from('serp_candidates')
+        .insert(rows)
+        .select('id'),
+      15_000,
+      'write_serp_candidates: serp_candidates insert'
+    );
 
     if (error) {
       return {
@@ -228,20 +237,24 @@ export const writeAnswerTool = tool(
   async (args) => {
     const db = getSupabase();
 
-    const { data, error } = await db
-      .from('answers')
-      .insert({
-        run_id: args.run_id,
-        question_template_id: args.question_template_id,
-        question_text: args.question_text,
-        answer_text: args.answer_text,
-        answer_data: args.answer_data,
-        status: 'ready',
-        confidence: args.confidence,
-        sources_count: args.sources_count,
-      })
-      .select('id')
-      .single();
+    const { data, error } = await withTimeout(
+      db
+        .from('answers')
+        .insert({
+          run_id: args.run_id,
+          question_template_id: args.question_template_id,
+          question_text: args.question_text,
+          answer_text: args.answer_text,
+          answer_data: args.answer_data,
+          status: 'ready',
+          confidence: args.confidence,
+          sources_count: args.sources_count,
+        })
+        .select('id')
+        .single(),
+      15_000,
+      'write_answer: answers insert'
+    );
 
     if (error) {
       return {

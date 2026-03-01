@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { tool } from '@anthropic-ai/claude-agent-sdk';
-import { getSupabase } from '../lib/supabase.js';
+import { getSupabase, withTimeout } from '../lib/supabase.js';
 import { getNimbleClient } from '../lib/nimble-client.js';
 
 export const findTemplateTool = tool(
@@ -34,15 +34,19 @@ export const findTemplateTool = tool(
         query = query.ilike('name', `%${args.retailer_name}%`);
       }
 
-      const { data: agents } = await query;
+      const { data: agents } = await withTimeout(query, 15_000, 'find_template: nimble_agents query');
 
       if (agents && agents.length > 0) {
         // Also get the linked retailer info
         const domains = [...new Set(agents.map((a) => a.domain).filter(Boolean))];
-        const { data: retailers } = await db
-          .from('retailers')
-          .select('id, name, domain, serp_agent_id, pdp_agent_id')
-          .in('domain', domains);
+        const { data: retailers } = await withTimeout(
+          db
+            .from('retailers')
+            .select('id, name, domain, serp_agent_id, pdp_agent_id')
+            .in('domain', domains),
+          15_000,
+          'find_template: retailers query'
+        );
 
         return {
           content: [
