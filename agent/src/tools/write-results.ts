@@ -1,10 +1,11 @@
 import { z } from 'zod';
 import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { getSupabase } from '../lib/supabase.js';
+import { runValidationChecks } from './validate.js';
 
 export const writeObservationTool = tool(
   'write_observation',
-  'Write a validated observation (price/availability/product data) to Supabase. Call validate_observation first to get a quality score. This is the primary way to record data collected from retailers.',
+  'Write an observation (price/availability/product data) to Supabase. Auto-validates before saving — no need to call validate_observation first. Uses upsert to avoid duplicates on (run_id, retailer_id, product_id, location_id).',
   {
     run_id: z.string().describe('Run ID'),
     retailer_id: z.string().describe('Retailer UUID'),
@@ -18,59 +19,98 @@ export const writeObservationTool = tool(
     size_raw: z.string().optional(),
     pack_count: z.number().optional().default(1),
     in_stock: z.boolean().optional(),
-    rating: z.number().optional(),
+    rating: z.number().min(0).max(5).optional(),
     review_count: z.number().optional(),
     serp_rank: z.number().optional(),
-    confidence: z.number().optional(),
+    confidence: z.number().min(0).max(1).optional(),
     source_url: z.string().optional(),
     collection_method: z.enum(['website_search_agent', 'nimble_web_tools']).optional(),
     collection_tier: z.enum(['wsa', 'search_extract', 'generic_llm']).optional(),
     zip_used: z.string().optional(),
-    validation_status: z.enum(['pass', 'warn', 'fail']).optional(),
-    validation_reasons: z.array(z.string()).optional().default([]),
-    quality_score: z.number().optional(),
+    ai_parsed_fields: z.record(z.string(), z.unknown()).optional().describe('AI-extracted structured fields'),
+    ai_confidence: z.number().min(0).max(1).optional().describe('AI extraction confidence 0-1'),
     raw_payload: z.record(z.string(), z.unknown()).optional(),
   },
   async (args) => {
     const db = getSupabase();
 
+    // Auto-validate
+    const validation = runValidationChecks({
+      shelf_price: args.shelf_price,
+      promo_price: args.promo_price,
+      unit_price: args.unit_price,
+      size_oz: args.size_oz,
+      size_raw: args.size_raw,
+      in_stock: args.in_stock,
+      source_url: args.source_url,
+      rating: args.rating,
+      confidence: args.confidence,
+    });
+
+    const row = {
+      run_id: args.run_id,
+      retailer_id: args.retailer_id,
+      location_id: args.location_id,
+      product_id: args.product_id,
+      product_match_id: args.product_match_id,
+      shelf_price: args.shelf_price,
+      promo_price: args.promo_price,
+      unit_price: args.unit_price,
+      size_oz: args.size_oz,
+      size_raw: args.size_raw,
+      pack_count: args.pack_count,
+      in_stock: args.in_stock,
+      rating: args.rating,
+      review_count: args.review_count,
+      serp_rank: args.serp_rank,
+      confidence: args.confidence,
+      source_url: args.source_url,
+      collection_method: args.collection_method,
+      collection_tier: args.collection_tier,
+      zip_used: args.zip_used,
+      validation_status: validation.validation_status,
+      validation_reasons: validation.reasons,
+      quality_score: validation.quality_score,
+      ai_parsed_fields: args.ai_parsed_fields,
+      ai_confidence: args.ai_confidence,
+      raw_payload: args.raw_payload,
+    };
+
+    // Upsert: if a row for (run_id, retailer_id, product_id, location_id) exists, update it
     const { data, error } = await db
       .from('observations')
-      .insert({
-        run_id: args.run_id,
-        retailer_id: args.retailer_id,
-        location_id: args.location_id,
-        product_id: args.product_id,
-        product_match_id: args.product_match_id,
-        shelf_price: args.shelf_price,
-        promo_price: args.promo_price,
-        unit_price: args.unit_price,
-        size_oz: args.size_oz,
-        size_raw: args.size_raw,
-        pack_count: args.pack_count,
-        in_stock: args.in_stock,
-        rating: args.rating,
-        review_count: args.review_count,
-        serp_rank: args.serp_rank,
-        confidence: args.confidence,
-        source_url: args.source_url,
-        collection_method: args.collection_method,
-        collection_tier: args.collection_tier,
-        zip_used: args.zip_used,
-        validation_status: args.validation_status,
-        validation_reasons: args.validation_reasons,
-        quality_score: args.quality_score,
-        raw_payload: args.raw_payload,
-      })
+      .upsert(row, { onConflict: 'run_id,retailer_id,product_id,location_id', ignoreDuplicates: false })
       .select('id')
       .single();
 
     if (error) {
+      // Fall back to plain insert if upsert constraint doesn't exist yet
+      const { data: insertData, error: insertError } = await db
+        .from('observations')
+        .insert(row)
+        .select('id')
+        .single();
+
+      if (insertError) {
+        return {
+          content: [
+            {
+              type: 'text' as const,
+              text: JSON.stringify({ success: false, error: insertError.message }),
+            },
+          ],
+        };
+      }
+
       return {
         content: [
           {
             type: 'text' as const,
-            text: JSON.stringify({ success: false, error: error.message }),
+            text: JSON.stringify({
+              success: true,
+              observation_id: insertData.id,
+              validation: validation,
+            }),
           },
         ],
       };
@@ -83,6 +123,7 @@ export const writeObservationTool = tool(
           text: JSON.stringify({
             success: true,
             observation_id: data.id,
+            validation: validation,
           }),
         },
       ],

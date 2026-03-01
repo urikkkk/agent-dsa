@@ -1,9 +1,10 @@
 import { z } from 'zod';
 import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { getNimbleClient } from '../lib/nimble-client.js';
-import { withRetry } from '../lib/retry.js';
+import { withRetry, isCircuitOpen } from '../lib/retry.js';
 import { parsePdpResult, pdpToProduct } from '../lib/parsers.js';
 import { getSupabase } from '../lib/supabase.js';
+import { generateTaskId, getAttemptNumber, emitLedgerEvent } from '../lib/ledger.js';
 
 export const pdpFetchTool = tool(
   'pdp_fetch',
@@ -19,6 +20,39 @@ export const pdpFetchTool = tool(
     const nimble = getNimbleClient();
     const db = getSupabase();
     const startTime = Date.now();
+
+    // ── Ledger: started event + circuit breaker ──
+    const taskId = generateTaskId(args.run_id ?? '', args.retailer_id ?? '', 'pdp_fetch', args.product_id, args.zip_code);
+    const attempt = await getAttemptNumber(taskId);
+
+    const cbKey = `${args.retailer_id}:pdp_fetch`;
+    if (isCircuitOpen(cbKey)) {
+      void emitLedgerEvent({
+        run_id: args.run_id ?? '',
+        event_type: 'task',
+        agent_name: 'webops',
+        step_name: 'collection',
+        task_id: taskId,
+        attempt,
+        status: 'skipped',
+        tool_name: 'pdp_fetch',
+        error: { code: 'CIRCUIT_OPEN', message: `Circuit open for ${cbKey}` },
+        next_action_hint: 'skip',
+      });
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: 'circuit_open' }) }] };
+    }
+
+    emitLedgerEvent({
+      run_id: args.run_id ?? '',
+      event_type: 'task',
+      agent_name: 'webops',
+      step_name: 'collection',
+      task_id: taskId,
+      attempt,
+      status: 'started',
+      tool_name: 'pdp_fetch',
+      provenance: { product_id: args.product_id, zip_code: args.zip_code },
+    });
 
     // Log request
     let requestId: string | undefined;

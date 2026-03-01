@@ -56,9 +56,12 @@ export function parsePdpResult(rawData: unknown): NimblePdpResult | null {
   return {
     title: String(data.product_title || data.title || data.name || ''),
     brand: data.brand ? String(data.brand) : undefined,
-    price: Number(
-      data.web_price || data.price || data.shelf_price || data.product_price || 0
-    ),
+    price:
+      data.web_price != null ? Number(data.web_price)
+      : data.price != null ? Number(data.price)
+      : data.shelf_price != null ? Number(data.shelf_price)
+      : data.product_price != null ? Number(data.product_price)
+      : null,
     promo_price:
       data.promo_price != null
         ? Number(data.promo_price)
@@ -112,9 +115,10 @@ export function pdpToProduct(
   const size = pdp.size_raw
     ? parseSize(pdp.size_raw)
     : { oz: 0, raw: '', pack_count: 1 };
+  const price = pdp.price ?? 0;
   const unit_price =
     pdp.unit_price ||
-    (size.oz > 0 ? computeUnitPrice(pdp.price, size.oz) : 0);
+    (size.oz > 0 ? computeUnitPrice(price, size.oz) : 0);
 
   return {
     name: pdp.title,
@@ -122,7 +126,7 @@ export function pdpToProduct(
     size_oz: size.oz,
     size_raw: pdp.size_raw || '',
     pack_count: size.pack_count,
-    shelf_price: pdp.price,
+    shelf_price: price,
     promo_price: pdp.promo_price,
     unit_price,
     in_stock: pdp.in_stock,
@@ -131,6 +135,6 @@ export function pdpToProduct(
     source_url: sourceUrl,
     retailer_product_id: retailerProductId,
     confidence:
-      pdp.price > 0 && size.oz > 0 ? 0.9 : pdp.price > 0 ? 0.7 : 0.3,
+      price > 0 && size.oz > 0 ? 0.9 : price > 0 ? 0.7 : 0.3,
   };
 }

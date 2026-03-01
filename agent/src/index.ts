@@ -6,6 +6,7 @@ delete process.env.CLAUDECODE;
 
 import { getSupabase } from './lib/supabase.js';
 import { executeQuestion } from './execute-question.js';
+import { RunEventBus, formatRunEvent } from './lib/run-events.js';
 
 const POLL_INTERVAL_MS = parseInt(
   process.env.AGENT_POLL_INTERVAL_MS || '5000',
@@ -36,7 +37,11 @@ async function pollForPendingRuns(): Promise<void> {
   console.log(`\n--- Picking up run ${run.id} ---`);
   console.log(`Question: ${run.question_text || '(no question)'}`);
 
-  const result = await executeQuestion(run.id);
+  const eventBus = new RunEventBus(run.id);
+  eventBus.on('run_event', (e) => console.log(formatRunEvent(e)));
+  eventBus.startHeartbeat(10_000);
+
+  const result = await executeQuestion(run.id, eventBus);
 
   if (result.success) {
     console.log(`Run ${run.id} completed successfully`);

@@ -10,24 +10,42 @@ import {
   writeSerpCandidatesTool,
   writeAnswerTool,
 } from './write-results.js';
-import { validateObservationTool } from './validate.js';
-import { dedupTool } from './dedup.js';
+import { dedupAndWriteSerpCandidatesTool } from './dedup.js';
+import { readObservationsTool } from './read-observations.js';
+import { readCandidatesTool } from './read-candidates.js';
 
-export function createDsaToolServer() {
+/**
+ * WebOps: collection + writing observations/candidates.
+ * Cannot write answers or read config (config is injected into its prompt).
+ */
+export function createWebOpsToolServer() {
   return createSdkMcpServer({
-    name: 'dsa-tools',
+    name: 'webops-tools',
     tools: [
       serpSearchTool,
       pdpFetchTool,
       webSearchFallbackTool,
       urlExtractFallbackTool,
       findTemplateTool,
-      readConfigTool,
       writeObservationTool,
       writeSerpCandidatesTool,
+      dedupAndWriteSerpCandidatesTool,
+    ],
+  });
+}
+
+/**
+ * DSA Analysis: read collected data + compute answers.
+ * Cannot call any Nimble/web tools or write observations.
+ */
+export function createDsaAnalysisToolServer() {
+  return createSdkMcpServer({
+    name: 'dsa-tools',
+    tools: [
+      readConfigTool,
+      readObservationsTool,
+      readCandidatesTool,
       writeAnswerTool,
-      validateObservationTool,
-      dedupTool,
     ],
   });
 }
