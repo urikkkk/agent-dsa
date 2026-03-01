@@ -34,7 +34,18 @@ export const writeObservationTool = tool(
   async (args) => {
     const db = getSupabase();
 
-    // Auto-validate
+    // Look up retailer domain for URL validation
+    let retailerDomain: string | undefined;
+    if (args.retailer_id) {
+      const { data: retailer } = await db
+        .from('retailers')
+        .select('domain')
+        .eq('id', args.retailer_id)
+        .single();
+      retailerDomain = retailer?.domain as string | undefined;
+    }
+
+    // Auto-validate (now includes URL domain matching)
     const validation = runValidationChecks({
       shelf_price: args.shelf_price,
       promo_price: args.promo_price,
@@ -43,6 +54,7 @@ export const writeObservationTool = tool(
       size_raw: args.size_raw,
       in_stock: args.in_stock,
       source_url: args.source_url,
+      retailer_domain: retailerDomain,
       rating: args.rating,
       confidence: args.confidence,
     });
@@ -242,15 +254,9 @@ export const writeAnswerTool = tool(
       };
     }
 
-    // Update run status to completed
-    await db
-      .from('runs')
-      .update({
-        status: 'completed',
-        finished_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .eq('id', args.run_id);
+    // NOTE: Do NOT set run status here — the orchestrator in execute-question.ts
+    // handles status transitions after checkCompletionCriteria, step summaries,
+    // memory writes, and cost tracking are all finished.
 
     return {
       content: [

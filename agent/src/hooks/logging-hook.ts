@@ -32,6 +32,12 @@ const ALLOWED_TOOLS: Record<AgentName, Set<string>> = {
  * PostToolUse hook that emits ledger events for every tool call.
  * Detects tool-door violations, stores artifacts with dedup,
  * and links completed/failed events back to their started span.
+ *
+ * IMPORTANT: This fires AFTER tool execution — it is observability-only
+ * and cannot block or prevent tool calls. Real enforcement is done by
+ * separating tools into distinct MCP servers in tools/index.ts:
+ * WebOps gets collection tools, DSA gets analysis tools.
+ * The tool-door check here is a secondary audit trail.
  */
 export function createLoggingHook(
   runId: string,
@@ -67,14 +73,8 @@ export function createLoggingHook(
               message: `Agent "${agentName}" attempted to use disallowed tool "${toolName}"`,
             },
           });
-          // Also write to legacy agent_logs for backward compat
-          await db.from('agent_logs').insert({
-            run_id: runId,
-            session_id: agentName,
-            tool_name: toolName,
-            tool_input: toolInput ?? null,
-            tool_output: toolResponse ?? null,
-          });
+          // Legacy agent_logs writes removed — the agent_logs_v2 view
+          // reconstructs this data from ledger_events + ledger_artifacts.
           return;
         }
 
@@ -85,11 +85,9 @@ export function createLoggingHook(
         ]);
 
         // ── Determine status ──
-        const responseStr = JSON.stringify(toolResponse ?? {});
         const isError =
-          responseStr.includes('"success":false') ||
-          responseStr.includes('"error"') ||
-          responseStr.includes('failed');
+          toolResponse?.success === false ||
+          toolResponse?.error != null;
         const status = isError ? 'failed' : 'completed';
 
         // ── Generate task_id from tool input args ──
@@ -127,11 +125,12 @@ export function createLoggingHook(
         // ── Determine next_action_hint for failures ──
         let nextActionHint: NextActionHint | undefined;
         if (isError) {
-          if (responseStr.includes('timeout') || responseStr.includes('TIMEOUT')) {
+          const errMsg = String(toolResponse?.error ?? '').toLowerCase();
+          if (errMsg.includes('timeout')) {
             nextActionHint = 'retry';
-          } else if (responseStr.includes('404') || responseStr.includes('not_found')) {
+          } else if (errMsg.includes('404') || errMsg.includes('not_found')) {
             nextActionHint = 'skip';
-          } else if (responseStr.includes('rate_limit') || responseStr.includes('429')) {
+          } else if (errMsg.includes('rate_limit') || errMsg.includes('429')) {
             nextActionHint = 'retry';
           } else {
             nextActionHint = 'fallback';
@@ -196,14 +195,8 @@ export function createLoggingHook(
           }
         }
 
-        // ── Also write to legacy agent_logs for backward compat ──
-        await db.from('agent_logs').insert({
-          run_id: runId,
-          session_id: agentName,
-          tool_name: toolName,
-          tool_input: toolInput ?? null,
-          tool_output: toolResponse ?? null,
-        });
+        // Legacy agent_logs writes removed — the agent_logs_v2 view
+        // reconstructs this data from ledger_events + ledger_artifacts.
       } catch {
         // Don't let logging failures break the agent
       }

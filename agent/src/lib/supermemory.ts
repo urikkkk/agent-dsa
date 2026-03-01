@@ -1,5 +1,6 @@
 import Supermemory from 'supermemory';
 import { emitLedgerEvent } from './ledger.js';
+import { withRetry } from './retry.js';
 import type { AgentName, StepSummary } from '@agent-dsa/shared';
 
 // ── Singleton client (follows supabase.ts pattern) ──────────────
@@ -167,17 +168,21 @@ export function memoryAdd(
     try {
       const client = getClient();
       const redacted = redact(content);
-      await client.documents.add({
-        content: redacted,
-        customId: `${runId}:${phase}`,
-        containerTags: containerTags(runId, retailerIds),
-        metadata: {
-          runId,
-          agentName,
-          phase,
-          createdAt: new Date().toISOString(),
-        },
-      });
+      await withRetry(
+        () =>
+          client.documents.add({
+            content: redacted,
+            customId: `${runId}:${phase}`,
+            containerTags: containerTags(runId, retailerIds),
+            metadata: {
+              runId,
+              agentName,
+              phase,
+              createdAt: new Date().toISOString(),
+            },
+          }),
+        { maxAttempts: 2, baseDelayMs: 500 }
+      );
 
       emitLedgerEvent({
         run_id: runId,

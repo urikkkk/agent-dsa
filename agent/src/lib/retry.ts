@@ -25,6 +25,10 @@ export interface RetryResult<T> {
 
 // ── Circuit Breaker ─────────────────────────────────────────────
 
+// In-memory circuit breaker state is intentional: the daemon runs as a single
+// long-lived process, so volatile state gives us per-process isolation without
+// needing a shared store. State resets naturally on restart, which is desirable
+// since transient failures (e.g. network blips) shouldn't persist across deploys.
 const circuitBreakers = new Map<string, CircuitBreakerState>();
 
 const CIRCUIT_BREAKER_THRESHOLD = 3;
