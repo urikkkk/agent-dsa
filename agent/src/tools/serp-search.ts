@@ -2,8 +2,10 @@ import { z } from 'zod';
 import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { getNimbleClient } from '../lib/nimble-client.js';
 import { withRetry } from '../lib/retry.js';
+import { isCircuitOpen } from '../lib/retry.js';
 import { parseSerpResults } from '../lib/parsers.js';
 import { getSupabase } from '../lib/supabase.js';
+import { generateTaskId, getAttemptNumber, emitLedgerEvent } from '../lib/ledger.js';
 
 export const serpSearchTool = tool(
   'serp_search',
@@ -19,6 +21,39 @@ export const serpSearchTool = tool(
     const nimble = getNimbleClient();
     const db = getSupabase();
     const startTime = Date.now();
+
+    // ── Ledger: started event + circuit breaker ──
+    const taskId = generateTaskId(args.run_id ?? '', args.retailer_id ?? '', 'serp_search', args.keyword, args.zip_code);
+    const attempt = await getAttemptNumber(taskId);
+
+    const cbKey = `${args.retailer_id}:serp_search`;
+    if (isCircuitOpen(cbKey)) {
+      void emitLedgerEvent({
+        run_id: args.run_id ?? '',
+        event_type: 'task',
+        agent_name: 'webops',
+        step_name: 'collection',
+        task_id: taskId,
+        attempt,
+        status: 'skipped',
+        tool_name: 'serp_search',
+        error: { code: 'CIRCUIT_OPEN', message: `Circuit open for ${cbKey}` },
+        next_action_hint: 'skip',
+      });
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: 'circuit_open' }) }] };
+    }
+
+    emitLedgerEvent({
+      run_id: args.run_id ?? '',
+      event_type: 'task',
+      agent_name: 'webops',
+      step_name: 'collection',
+      task_id: taskId,
+      attempt,
+      status: 'started',
+      tool_name: 'serp_search',
+      provenance: { keyword: args.keyword, zip_code: args.zip_code },
+    });
 
     // Log the request
     let requestId: string | undefined;

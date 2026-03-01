@@ -81,7 +81,7 @@ async function main(): Promise<void> {
   }
 
   console.log(`Created run: ${run.id}`);
-  console.log(`Executing...\n`);
+  console.log(`Executing (two-phase: collecting → analyzing)...\n`);
 
   const result = await executeQuestion(run.id);
 
