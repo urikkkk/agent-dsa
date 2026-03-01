@@ -4,43 +4,82 @@ AI-powered e-commerce intelligence platform that collects product data (prices, 
 
 ## How It Works
 
-A natural language question like _"Best price for Cheerios across Amazon and Walmart in Chicago"_ triggers a Claude AI agent that follows an optimized decision tree:
+A natural language question like _"Best price for Cheerios across Amazon and Walmart in Chicago"_ triggers a two-phase agent pipeline:
 
-**Fast Path** (retailer + product known — 4 steps, ~7-9 agent turns):
+### Phase 1: WebOps Collection (up to 20 turns)
+A WebOps agent collects raw data from retailers using an optimized decision tree:
+
+**Fast Path** (retailer + product known):
 1. `serp_search` — find matching products on the retailer SERP
 2. `pdp_fetch` — get structured pricing from product detail pages
 3. `write_observation` — auto-validates and persists in one call
-4. `write_answer` — returns a confidence-scored answer with source URLs
 
 **Discovery Path** (ambiguous query): reads config first, then follows the fast path.
 **Fallback Path** (WSA agent unavailable): uses `web_search_fallback` + `url_extract_fallback`.
 
-All API calls, tool invocations, and validation decisions are logged to Supabase for full observability.
+### Phase 2: DSA Analysis (up to 10 turns)
+A separate analysis agent reads the collected data, computes the answer, and writes it:
+1. `read_observations` / `read_candidates` — load collected data
+2. `read_config` — query retailer/product metadata
+3. `write_answer` — store the confidence-scored answer with sources
+
+Each phase runs in its own MCP tool server with strict **tool-door isolation** — the WebOps agent cannot write answers, and the DSA agent cannot call Nimble APIs.
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌──────────────────┐     ┌──────────────┐
-│   CLI / Web  │────>│   Claude Agent    │────>│  Nimble WSA  │
-│  (question)  │     │  (Agent SDK)      │     │  (scraping)  │
-└─────────────┘     └──────────────────┘     └──────────────┘
-                           │                         │
-                           v                         v
-                    ┌──────────────┐         ┌──────────────┐
-                    │   Supabase   │<────────│  Parsed Data │
-                    │  (Postgres)  │         │  + Validation│
-                    └──────────────┘         └──────────────┘
+┌──────────────┐
+│  CLI / Web   │
+│  (question)  │
+└──────┬───────┘
+       │
+       v
+┌──────────────────────────────────────────────────────────┐
+│                    Orchestrator                           │
+│                 (execute-question.ts)                     │
+│                                                          │
+│  ┌─────────────────────┐    ┌──────────────────────┐     │
+│  │  Phase 1: WebOps    │    │  Phase 2: DSA        │     │
+│  │  (collection)       │    │  (analysis)          │     │
+│  │                     │    │                      │     │
+│  │  serp_search        │    │  read_config         │     │
+│  │  pdp_fetch          │    │  read_observations   │     │
+│  │  web_search_fallback│    │  read_candidates     │     │
+│  │  url_extract_fallback    │  write_answer        │     │
+│  │  write_observation  │    │                      │     │
+│  │  write_serp_cands   │    └──────────┬───────────┘     │
+│  └──────────┬──────────┘               │                 │
+│             │                          │                 │
+│             v                          v                 │
+│  ┌─────────────────────────────────────────────────┐     │
+│  │           Observability Ledger                   │     │
+│  │  ledger_events · ledger_artifacts · run_steps    │     │
+│  │  circuit breaker · watchdog · step summaries     │     │
+│  └─────────────────────────────────────────────────┘     │
+└──────────────────────┬───────────────────────────────────┘
+                       │
+          ┌────────────┴────────────┐
+          v                         v
+   ┌──────────────┐         ┌──────────────┐
+   │   Supabase   │         │  Nimble WSA  │
+   │  (Postgres)  │         │  (scraping)  │
+   └──────────────┘         └──────────────┘
 ```
 
 **Monorepo layout:**
 
 ```
 agent-dsa/
-├── agent/       # Agent executor — tools, prompts, Nimble client
-├── docs/skills/ # 18 reusable skill procedures + index (domain knowledge)
-├── shared/      # Shared TypeScript types
-├── web/         # Web frontend (Next.js)
-└── supabase/    # Database migrations and seed data
+├── agent/           # Agent executor — tools, prompts, ledger, Nimble client
+│   └── src/
+│       ├── agents/  # WebOps + DSA prompt builders
+│       ├── hooks/   # PostToolUse logging hook (ledger-aware)
+│       ├── lib/     # Nimble client, retry, ledger, parsers, normalize
+│       └── tools/   # Tool definitions (collection, analysis, write)
+├── docs/skills/     # 18 reusable skill procedures + index (domain knowledge)
+├── shared/          # Shared TypeScript types
+├── web/             # Web frontend (Next.js)
+└── supabase/        # Database migrations and seed data
 ```
 
 ## Tech Stack
@@ -98,14 +137,14 @@ NIMBLE_API_BASE_URL=https://sdk.nimbleway.com
 
 # Agent config (optional)
 AGENT_MODEL=claude-sonnet-4-6
-AGENT_MAX_TURNS=30
-AGENT_POLL_INTERVAL_MS=5000
+WEBOPS_MAX_TURNS=20
+DSA_MAX_TURNS=10
 ```
 
 ### Database Setup
 
 ```bash
-npm run db:push    # Apply migrations (22 tables)
+npm run db:push    # Apply migrations (3 migration files, 24 tables)
 npm run db:seed    # Load seed data (4 retailers, 12 products, 3 locations)
 ```
 
@@ -121,39 +160,78 @@ npm run agent:cli "Best price for Cheerios in Chicago"
 
 ## Agent Tools
 
-The Claude agent has access to 13 specialized tools organized by tier:
+Tools are organized into two isolated MCP servers with strict tool-door enforcement:
 
-### Data Collection (Tier 1 — WSA)
+### WebOps Tool Server (collection phase)
+
+| Tool | Tier | Description |
+|------|------|-------------|
+| `serp_search` | WSA | Search retailer product listings via Nimble WSA agents |
+| `pdp_fetch` | WSA | Fetch structured product detail page (price, stock, ratings) |
+| `web_search_fallback` | Fallback | General web search when WSA is unavailable |
+| `url_extract_fallback` | Fallback | Extract content from arbitrary URLs |
+| `find_wsa_template` | Meta | Discover available Nimble WSA agents for a retailer |
+| `write_observation` | Write | Auto-validates and stores a price/availability data point |
+| `write_serp_candidates` | Write | Store ranked search result listings |
+| `dedup_and_write` | Write | Deduplicate and persist SERP results in one call |
+
+### DSA Tool Server (analysis phase)
+
 | Tool | Description |
 |------|-------------|
-| `serp_search` | Search retailer product listings via Nimble WSA agents |
-| `pdp_fetch` | Fetch structured product detail page (price, stock, ratings) |
-
-### Data Collection (Tier 2 — Fallback)
-| Tool | Description |
-|------|-------------|
-| `web_search_fallback` | General web search when WSA is unavailable |
-| `url_extract_fallback` | Extract content from arbitrary URLs |
-
-### Metadata
-| Tool | Description |
-|------|-------------|
-| `find_wsa_template` | Discover available Nimble WSA agents for a retailer |
 | `read_config` | Query config tables (locations, retailers, products) |
-
-### Data Write
-| Tool | Description |
-|------|-------------|
-| `write_observation` | Auto-validates and stores a price/availability data point |
-| `write_serp_candidates` | Store ranked search result listings |
-| `dedup_and_write_serp_candidates` | Deduplicate and persist SERP results in one call |
+| `read_observations` | Read collected observations for analysis |
+| `read_candidates` | Read SERP candidates for analysis |
 | `write_answer` | Store the final computed answer |
 
-### Quality
-| Tool | Description |
-|------|-------------|
-| `validate_observation` | Optional pre-check (write_observation auto-validates) |
-| `dedup_candidates` | Remove duplicate SERP results (standalone) |
+Tool-door violations are detected and logged as `tool_door_violation` events in the ledger.
+
+## Observability & Ledger System
+
+Every tool call, retry, and failure is tracked in a structured, append-only ledger:
+
+### Event Lifecycle
+
+Each data-collection task follows a `started` → `completed`/`failed` lifecycle:
+
+```
+serp_search("Cheerios", amazon)
+  ├── started  (span_id=A, attempt=1)
+  ├── failed   (parent_span_id=A, attempt=1, error=timeout, hint=retry)
+  ├── started  (span_id=B, attempt=2)
+  └── completed(parent_span_id=B, attempt=2)
+```
+
+### Components
+
+| Component | Purpose |
+|-----------|---------|
+| `ledger_events` | Append-only event log (started/completed/failed/skipped per task) |
+| `ledger_artifacts` | Raw I/O storage with SHA-256 deduplication |
+| `run_steps` | Step-level summaries with coverage %, fallback rate, error clusters |
+| Circuit breaker | In-memory per `retailer:tool`, opens after 3 consecutive failures, 60s cooldown |
+| Watchdog | Detects stuck tasks (started but no terminal event after 120s) |
+| Completion criteria | Run marked complete only when all steps summarized, no stuck tasks, answer exists |
+
+### Step Summaries
+
+After each agent phase, the orchestrator computes and persists a `StepSummary`:
+
+```
+[collecting] summary: 8/10 tasks, 80% coverage
+[analyzing]  summary: 4/4 tasks, 100% coverage
+```
+
+Summaries include: `total_tasks`, `completed`, `failed`, `skipped`, `coverage_pct`, `fallback_rate`, `validation_breakdown`, `error_clusters`, and `rerun_plan`.
+
+### Debugging
+
+```typescript
+import { getRunDebugData } from './lib/ledger';
+const debug = await getRunDebugData(runId);
+// Returns: { events, artifacts, summaries, retryHistory }
+// retryHistory groups events by task_id showing full attempt chains
+```
 
 ## Data Validation
 
@@ -167,7 +245,7 @@ Every observation is **auto-validated** inside `write_observation` with category
 - Rating within 0-5 range
 - Confidence within 0-1 range
 
-Each check produces a quality score (0.3 fail / 0.7 warn / 1.0 pass). Validation results are returned inline with the write response — no separate `validate_observation` call needed.
+Each check produces a quality score (0.3 fail / 0.7 warn / 1.0 pass). Validation results are returned inline with the write response.
 
 ## Question Templates
 
@@ -182,16 +260,17 @@ Each check produces a quality score (0.3 fail / 0.7 warn / 1.0 pass). Validation
 
 ## Database Schema
 
-22 tables organized into:
+24 tables across 3 migrations:
 
 - **Config** — `locations`, `retailers`, `nimble_agents`, `products`, `product_matches`
 - **Workflow** — `question_templates`, `keyword_sets`, `runs`, `answers` (unique per run)
 - **Data** — `serp_candidates`, `observations` (deduplicated per run+retailer+product+location), `run_steps`
 - **API Tracking** — `nimble_requests`, `nimble_responses`, `fallback_events`
-- **Quality** — `validation_results`, `agent_logs`, `run_errors`, `agent_health_daily`
+- **Quality** — `validation_results`, `run_errors`, `agent_health_daily`
+- **Observability** — `ledger_events` (append-only), `ledger_artifacts` (SHA-256 dedup), `agent_logs` (legacy)
 - **Admin** — `subscriptions`, `audit_events`
 
-Key indexes: `observations(product_id)`, `observations(validation_status)`, `observations(created_at DESC)`, `products(upc)`, `nimble_responses(nimble_request_id)`, `run_steps(run_id)`.
+The `agent_logs_v2` view provides backward compatibility, mapping ledger events to the legacy `agent_logs` shape.
 
 ## Scripts
 
@@ -228,17 +307,19 @@ The `index.md` registry maps question types (e.g., `best_price`, `serp_sov`) to 
 
 ## Performance
 
-Optimized agent workflow targeting 7-9 turns and ~$0.30 per question (down from 22 turns / $0.88 baseline):
+Optimized two-agent workflow targeting 7-9 WebOps turns + 3-4 DSA turns, ~$0.30 per question:
 
 | Optimization | Impact |
 |-------------|--------|
+| Two-phase split (WebOps + DSA) | Focused prompts, fewer wasted turns |
+| Tool-door isolation (separate MCP servers) | Prevents cross-phase tool misuse |
 | Conditional decision tree (skip read_config/find_wsa_template) | ~10 fewer turns |
 | Auto-validation in write_observation | 1 fewer turn per observation |
 | Combined dedup_and_write_serp_candidates | 1 fewer turn |
 | Batch agent loading (single DB query) | 3-10s faster startup |
-| Reduced retry delays for fallback tools | 2-4s faster on retries |
-| Fire-and-forget logging | Non-blocking tool calls |
-| Turn-by-turn CLI progress (`[turn N] tool_name...`) | Debugging visibility |
+| Circuit breaker (3 failures → skip) | Avoids hammering broken endpoints |
+| Fire-and-forget ledger writes | Non-blocking observability |
+| Step summaries with coverage tracking | Quantified data quality |
 
 ## License
 
