@@ -6,6 +6,7 @@ delete process.env.CLAUDECODE;
 
 import { getSupabase } from './lib/supabase.js';
 import { executeQuestion } from './execute-question.js';
+import { RunEventBus, formatRunEvent } from './lib/run-events.js';
 
 async function main(): Promise<void> {
   const question = process.argv.slice(2).join(' ');
@@ -83,7 +84,11 @@ async function main(): Promise<void> {
   console.log(`Created run: ${run.id}`);
   console.log(`Executing (two-phase: collecting → analyzing)...\n`);
 
-  const result = await executeQuestion(run.id);
+  const eventBus = new RunEventBus(run.id);
+  eventBus.on('run_event', (e) => console.log(formatRunEvent(e)));
+  eventBus.startHeartbeat(10_000);
+
+  const result = await executeQuestion(run.id, eventBus);
 
   if (result.success) {
     console.log(`\n--- Run completed ---`);

@@ -13,7 +13,8 @@ import {
   checkCompletionCriteria,
 } from './lib/ledger.js';
 import { isMemoryEnabled, memorySearch, memoryAdd, buildMemoryPayload } from './lib/supermemory.js';
-import type { Run, Location, Retailer, NimbleAgent } from '@agent-dsa/shared';
+import type { RunEventBus } from './lib/run-events.js';
+import type { Run, Location, Retailer, NimbleAgent, StepSummary } from '@agent-dsa/shared';
 
 interface ExecuteResult {
   success: boolean;
@@ -23,7 +24,7 @@ interface ExecuteResult {
   error?: string;
 }
 
-export async function executeQuestion(runId: string): Promise<ExecuteResult> {
+export async function executeQuestion(runId: string, eventBus?: RunEventBus): Promise<ExecuteResult> {
   const db = getSupabase();
 
   // ── Load run context ──────────────────────────────────────────────
@@ -97,11 +98,13 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
   const model = process.env.AGENT_MODEL || 'claude-sonnet-4-6';
   const webOpsMaxTurns = parseInt(process.env.WEBOPS_MAX_TURNS || '20', 10);
   const dsaMaxTurns = parseInt(process.env.DSA_MAX_TURNS || '10', 10);
-  const webOpsHook = createLoggingHook(runId, 'webops', 'collection');
-  const dsaHook = createLoggingHook(runId, 'dsa', 'analysis');
+  const webOpsHook = createLoggingHook(runId, 'webops', 'collection', eventBus);
+  const dsaHook = createLoggingHook(runId, 'dsa', 'analysis', eventBus);
 
   let totalCostUsd = 0;
   let totalTurns = 0;
+  let webOpsSummary: StepSummary | undefined;
+  let dsaSummary: StepSummary | undefined;
 
   try {
     // ── Phase 1: WebOps Collection ────────────────────────────────────
@@ -114,6 +117,13 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
         updated_at: new Date().toISOString(),
       })
       .eq('id', runId);
+
+    eventBus?.send({
+      event_type: 'step_started',
+      agent_name: 'webops',
+      step_name: 'collection',
+      message: 'Starting WebOps data collection',
+    });
 
     const webOpsPrompt = buildWebOpsPrompt({
       run: run as Run,
@@ -151,7 +161,15 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
           .filter((c) => c.type === 'tool_use')
           .map((c) => c.name as string);
         if (toolUses.length > 0) {
-          console.log(`  [collecting] turn ${webOpsTurnCounter}: ${toolUses.join(', ')}`);
+          for (const tool of toolUses) {
+            eventBus?.send({
+              event_type: 'task_started',
+              agent_name: 'webops',
+              step_name: 'collection',
+              tool_name: tool,
+              message: `turn ${webOpsTurnCounter}: ${tool}`,
+            });
+          }
         }
       }
 
@@ -168,10 +186,23 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
 
     // ── WebOps step summary ───────────────────────────────────────────
     const webOpsTimedOut = await resolveStuckTasks(runId, 'webops', 'collection');
-    if (webOpsTimedOut > 0) console.log(`  [collecting] watchdog: ${webOpsTimedOut} stuck tasks timed out`);
-    const webOpsSummary = await computeStepSummary(runId, 'webops', 'collection');
+    if (webOpsTimedOut > 0) {
+      eventBus?.send({
+        event_type: 'skipped',
+        agent_name: 'webops',
+        step_name: 'collection',
+        message: `Watchdog: ${webOpsTimedOut} stuck tasks timed out`,
+      });
+    }
+    webOpsSummary = await computeStepSummary(runId, 'webops', 'collection');
     await writeStepSummary(runId, 'webops', 'collection', webOpsSummary);
-    console.log(`  [collecting] summary: ${webOpsSummary.completed}/${webOpsSummary.total_tasks} tasks, ${webOpsSummary.coverage_pct.toFixed(0)}% coverage`);
+    eventBus?.send({
+      event_type: 'step_summary',
+      agent_name: 'webops',
+      step_name: 'collection',
+      message: `Collection complete: ${webOpsSummary.completed}/${webOpsSummary.total_tasks} tasks`,
+      summary: webOpsSummary,
+    });
 
     // ── Store WebOps summary in long-term memory (fire-and-forget) ──
     const retailerNames = retailers.map((r) => r.name);
@@ -214,6 +245,13 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
       })
       .eq('id', runId);
 
+    eventBus?.send({
+      event_type: 'step_started',
+      agent_name: 'dsa',
+      step_name: 'analysis',
+      message: 'Starting DSA analysis',
+    });
+
     // ── Memory retrieval (best-effort) ────────────────────────────
     let priorKnowledge = '';
     if (isMemoryEnabled() && run.question_text) {
@@ -223,7 +261,13 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
         retailerIds.length > 0 ? retailerIds : undefined
       );
       if (priorKnowledge) {
-        console.log(`  [memory] retrieved ${priorKnowledge.split('\n').length} prior insights`);
+        eventBus?.send({
+          event_type: 'task_completed',
+          agent_name: 'dsa',
+          step_name: 'analysis',
+          tool_name: 'memory_search',
+          message: `Retrieved ${priorKnowledge.split('\n').length} prior insights`,
+        });
       }
     }
 
@@ -263,7 +307,15 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
           .filter((c) => c.type === 'tool_use')
           .map((c) => c.name as string);
         if (toolUses.length > 0) {
-          console.log(`  [analyzing] turn ${dsaTurnCounter}: ${toolUses.join(', ')}`);
+          for (const tool of toolUses) {
+            eventBus?.send({
+              event_type: 'task_started',
+              agent_name: 'dsa',
+              step_name: 'analysis',
+              tool_name: tool,
+              message: `turn ${dsaTurnCounter}: ${tool}`,
+            });
+          }
         }
       }
 
@@ -280,10 +332,23 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
 
     // ── DSA step summary ──────────────────────────────────────────────
     const dsaTimedOut = await resolveStuckTasks(runId, 'dsa', 'analysis');
-    if (dsaTimedOut > 0) console.log(`  [analyzing] watchdog: ${dsaTimedOut} stuck tasks timed out`);
-    const dsaSummary = await computeStepSummary(runId, 'dsa', 'analysis');
+    if (dsaTimedOut > 0) {
+      eventBus?.send({
+        event_type: 'skipped',
+        agent_name: 'dsa',
+        step_name: 'analysis',
+        message: `Watchdog: ${dsaTimedOut} stuck tasks timed out`,
+      });
+    }
+    dsaSummary = await computeStepSummary(runId, 'dsa', 'analysis');
     await writeStepSummary(runId, 'dsa', 'analysis', dsaSummary);
-    console.log(`  [analyzing] summary: ${dsaSummary.completed}/${dsaSummary.total_tasks} tasks, ${dsaSummary.coverage_pct.toFixed(0)}% coverage`);
+    eventBus?.send({
+      event_type: 'step_summary',
+      agent_name: 'dsa',
+      step_name: 'analysis',
+      message: `Analysis complete: ${dsaSummary.completed}/${dsaSummary.total_tasks} tasks`,
+      summary: dsaSummary,
+    });
 
     // ── Store DSA summary in long-term memory (fire-and-forget) ──
     memoryAdd(
@@ -317,6 +382,21 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
         })
         .eq('id', runId);
 
+      eventBus?.send({
+        event_type: 'run_complete',
+        agent_name: 'dsa',
+        step_name: 'analysis',
+        message: `Run completed with errors: ${reason}`,
+        final: {
+          success: false,
+          total_cost_usd: totalCostUsd,
+          num_turns: totalTurns,
+          webops_summary: webOpsSummary,
+          dsa_summary: dsaSummary,
+        },
+      });
+      eventBus?.dispose();
+
       return {
         success: false,
         totalCostUsd,
@@ -332,6 +412,22 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
       .eq('run_id', runId)
       .limit(1)
       .single();
+
+    eventBus?.send({
+      event_type: 'run_complete',
+      agent_name: 'dsa',
+      step_name: 'analysis',
+      message: 'Run completed successfully',
+      final: {
+        success: true,
+        answer_id: answer?.id,
+        total_cost_usd: totalCostUsd,
+        num_turns: totalTurns,
+        webops_summary: webOpsSummary,
+        dsa_summary: dsaSummary,
+      },
+    });
+    eventBus?.dispose();
 
     return {
       success: true,
@@ -358,6 +454,22 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
       error_message: errorMsg,
       error_type: 'agent_execution',
     });
+
+    eventBus?.send({
+      event_type: 'run_complete',
+      agent_name: 'dsa',
+      step_name: 'analysis',
+      message: `Run failed: ${errorMsg}`,
+      error: { code: 'AGENT_ERROR', message: errorMsg },
+      final: {
+        success: false,
+        total_cost_usd: totalCostUsd,
+        num_turns: totalTurns,
+        webops_summary: webOpsSummary,
+        dsa_summary: dsaSummary,
+      },
+    });
+    eventBus?.dispose();
 
     return { success: false, error: errorMsg };
   }

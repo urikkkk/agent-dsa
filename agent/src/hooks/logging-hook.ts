@@ -6,6 +6,7 @@ import {
   emitLedgerEvent,
 } from '../lib/ledger.js';
 import type { AgentName, NextActionHint } from '@agent-dsa/shared';
+import type { RunEventBus } from '../lib/run-events.js';
 
 // Allowed tools per agent (tool-door policy)
 const ALLOWED_TOOLS: Record<AgentName, Set<string>> = {
@@ -35,7 +36,8 @@ const ALLOWED_TOOLS: Record<AgentName, Set<string>> = {
 export function createLoggingHook(
   runId: string,
   agentName: AgentName,
-  stepName: string
+  stepName: string,
+  eventBus?: RunEventBus
 ): HookCallback {
   return async (input) => {
     // Fire-and-forget wrapper
@@ -164,6 +166,35 @@ export function createLoggingHook(
             : undefined,
           next_action_hint: nextActionHint,
         });
+
+        // ── Emit run event ──
+        if (eventBus) {
+          if (isError) {
+            eventBus.send({
+              event_type: nextActionHint === 'retry' ? 'retrying' : 'task_failed',
+              agent_name: agentName,
+              step_name: stepName,
+              tool_name: toolName,
+              task_id: taskId,
+              attempt,
+              status: nextActionHint === 'retry' ? 'retrying' : 'failed',
+              message: `${toolName} ${nextActionHint === 'retry' ? 'retrying' : 'failed'} (attempt ${attempt})`,
+              error: { code: 'TOOL_ERROR', message: (toolResponse?.error as string) ?? 'Tool execution failed' },
+              next_action_hint: nextActionHint,
+            });
+          } else {
+            eventBus.send({
+              event_type: 'task_completed',
+              agent_name: agentName,
+              step_name: stepName,
+              tool_name: toolName,
+              task_id: taskId,
+              attempt,
+              status: 'completed',
+              message: `${toolName} completed (attempt ${attempt})`,
+            });
+          }
+        }
 
         // ── Also write to legacy agent_logs for backward compat ──
         await db.from('agent_logs').insert({

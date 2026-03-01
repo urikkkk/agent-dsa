@@ -424,6 +424,43 @@ export interface LedgerArtifact {
   created_at: string;
 }
 
+// --- Run Event Streaming ---
+
+export type RunEventType =
+  | 'step_started'
+  | 'step_summary'
+  | 'task_started'
+  | 'task_completed'
+  | 'task_failed'
+  | 'retrying'
+  | 'skipped'
+  | 'heartbeat'
+  | 'run_complete';
+
+export interface RunEvent {
+  timestamp: string;
+  run_id: string;
+  event_type: RunEventType;
+  agent_name: AgentName;
+  step_name: string;
+  tool_name?: string;
+  task_id?: string;
+  attempt?: number;
+  status?: LedgerEventStatus;
+  message: string;
+  error?: { code: string; message: string };
+  next_action_hint?: NextActionHint;
+  summary?: StepSummary;
+  final?: {
+    success: boolean;
+    answer_id?: string;
+    total_cost_usd?: number;
+    num_turns?: number;
+    webops_summary?: StepSummary;
+    dsa_summary?: StepSummary;
+  };
+}
+
 export interface StepSummary {
   total_tasks: number;
   completed: number;
