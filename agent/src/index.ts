@@ -7,6 +7,7 @@ delete process.env.CLAUDECODE;
 import { getSupabase } from './lib/supabase.js';
 import { executeQuestion } from './execute-question.js';
 import { RunEventBus, formatRunEvent } from './lib/run-events.js';
+import { logMemoryStatus } from './lib/supermemory.js';
 
 const POLL_INTERVAL_MS = parseInt(
   process.env.AGENT_POLL_INTERVAL_MS || '5000',
@@ -64,6 +65,7 @@ async function pollForPendingRuns(): Promise<void> {
 async function main(): Promise<void> {
   console.log('Agent DSA - Run Executor');
   console.log(`Polling every ${POLL_INTERVAL_MS}ms for pending runs...`);
+  logMemoryStatus();
   console.log('Press Ctrl+C to stop.\n');
 
   // Initial poll

@@ -612,3 +612,44 @@ export interface ValidationRule {
   name: string;
   check: (obs: Observation, history?: Observation[]) => ValidationRuleResult;
 }
+
+// --- HTTP Server Types ---
+
+export type SuggestedActionType =
+  | 'retry_failed' | 'show_debug' | 'rerun_with_location' | 'rerun_broader';
+
+export interface SuggestedAction {
+  action: SuggestedActionType;
+  label: string;
+  description: string;
+  payload: Record<string, unknown>;
+}
+
+export interface EnrichedRunResult {
+  run_id: string;
+  success: boolean;
+  final_answer: string | null;
+  confidence: number | null;
+  summaries: Record<string, unknown>[];
+  suggested_next_actions: SuggestedAction[];
+  total_cost_usd: number | null;
+  num_turns: number | null;
+  error: string | null;
+}
+
+export interface StartRunRequest {
+  question_text: string;
+  location_id?: string;
+  retailer_ids?: string[];
+  parameters?: Record<string, unknown>;
+}
+
+export interface StartRunResponse {
+  run_id: string;
+  stream_url: string;
+}
+
+export interface RunActionRequest {
+  action: 'retry_failed' | 'show_debug' | 'rerun_with_location';
+  payload?: Record<string, unknown>;
+}

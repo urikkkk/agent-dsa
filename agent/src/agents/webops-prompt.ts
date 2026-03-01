@@ -55,6 +55,15 @@ You ONLY collect data. You do NOT analyze it or write answers. Another agent han
 ## Retailers & Agents
 ${retailerInfo || 'No retailers configured.'}
 
+${ctx.retailers.length > 0 ? `## FIRST ACTION (MANDATORY)
+You MUST call serp_search on your very first turn. Pick the first retailer and search immediately — do not plan or summarize first.` : `## FIRST ACTION (MANDATORY)
+No retailer agents are available. You MUST use the bootstrap procedure:
+1. web_search_fallback(query="${ctx.run.question_text || 'product search'}", focus="shopping", run_id="${ctx.run.id}") — do this FIRST
+2. url_extract_fallback on the most promising product URLs from the results
+3. write_observation for each price/availability data point found
+
+Your first tool call MUST be web_search_fallback. Do NOT plan or summarize — call the tool immediately.`}
+
 ## Available Tools
 - serp_search — Search retailer SERP via WSA agent
 - pdp_fetch — Fetch product detail page via WSA agent
@@ -79,6 +88,7 @@ ${retailerInfo || 'No retailers configured.'}
 3. write_observation with collection_tier='search_extract'
 
 ## Key Rules
+- You MUST call a tool on every turn. Never respond with only text.
 - Always pass run_id and retailer_id to every tool call.
 - Use the location's ZIP code when the retailer supports location-based pricing.
 - WSA calls (serp_search, pdp_fetch) take 10-120 seconds — this is normal.
