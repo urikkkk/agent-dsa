@@ -12,6 +12,7 @@
     "@anthropic-ai/claude-agent-sdk": "^0.2.63",
     "@supabase/supabase-js": "^2.98.0",
     "dotenv": "^17.3.1",
+    "supermemory": "^4.15.0",
     "zod": "^4.0.0"
   },
   "devDependencies": {

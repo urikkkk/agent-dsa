@@ -14,7 +14,11 @@ export interface CollectionSummary {
   has_validation_warnings: boolean;
 }
 
-export function buildDsaPrompt(ctx: DsaPromptContext, summary: CollectionSummary): string {
+export function buildDsaPrompt(
+  ctx: DsaPromptContext,
+  summary: CollectionSummary,
+  priorKnowledge?: string
+): string {
   const locationInfo = ctx.location
     ? `Location: ${ctx.location.city}, ${ctx.location.state} (ZIP codes: ${ctx.location.zip_codes.join(', ')})`
     : 'No specific location set.';
@@ -41,6 +45,12 @@ export function buildDsaPrompt(ctx: DsaPromptContext, summary: CollectionSummary
     ? '\n⚠️ Some observations have validation warnings — factor this into your confidence score.'
     : '';
 
+  const memorySection = priorKnowledge
+    ? `\n## Prior Knowledge (from previous runs)
+The following insights were recalled from previous analyses. Use them as supporting context but always verify against the current data:
+${priorKnowledge}\n`
+    : '';
+
   return `You are a digital shelf analytics specialist for General Mills. Product data has already been collected from retailer websites. Your job is to analyze it and write a final answer.
 
 ## Your Role
@@ -58,7 +68,7 @@ ${retailerNames || 'No retailers configured.'}
 - Observations collected: ${summary.observation_count}
 - SERP candidates collected: ${summary.candidate_count}
 - Retailers covered: ${summary.retailers_covered.join(', ') || 'none'}${warningNote}
-
+${memorySection}
 ## Available Tools
 - read_config — Read configuration tables (retailers, products, locations, etc.)
 - read_observations — Read observations collected for this run

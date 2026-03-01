@@ -12,6 +12,7 @@ import {
   writeStepSummary,
   checkCompletionCriteria,
 } from './lib/ledger.js';
+import { isMemoryEnabled, memorySearch, memoryAdd, buildMemoryPayload } from './lib/supermemory.js';
 import type { Run, Location, Retailer, NimbleAgent } from '@agent-dsa/shared';
 
 interface ExecuteResult {
@@ -172,6 +173,14 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
     await writeStepSummary(runId, 'webops', 'collection', webOpsSummary);
     console.log(`  [collecting] summary: ${webOpsSummary.completed}/${webOpsSummary.total_tasks} tasks, ${webOpsSummary.coverage_pct.toFixed(0)}% coverage`);
 
+    // ── Store WebOps summary in long-term memory (fire-and-forget) ──
+    const retailerNames = retailers.map((r) => r.name);
+    memoryAdd(
+      runId, 'webops', 'webops-summary',
+      buildMemoryPayload(runId, 'webops', 'collection', webOpsSummary, run.question_text, retailerNames),
+      retailerIds.length > 0 ? retailerIds : undefined
+    );
+
     // ── Build collection summary ──────────────────────────────────────
 
     const { data: observations } = await db
@@ -205,9 +214,23 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
       })
       .eq('id', runId);
 
+    // ── Memory retrieval (best-effort) ────────────────────────────
+    let priorKnowledge = '';
+    if (isMemoryEnabled() && run.question_text) {
+      priorKnowledge = await memorySearch(
+        runId,
+        run.question_text,
+        retailerIds.length > 0 ? retailerIds : undefined
+      );
+      if (priorKnowledge) {
+        console.log(`  [memory] retrieved ${priorKnowledge.split('\n').length} prior insights`);
+      }
+    }
+
     const dsaPrompt = buildDsaPrompt(
       { run: run as Run, location, retailers },
-      collectionSummary
+      collectionSummary,
+      priorKnowledge
     );
 
     const dsaUserPrompt = run.question_text
@@ -261,6 +284,13 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
     const dsaSummary = await computeStepSummary(runId, 'dsa', 'analysis');
     await writeStepSummary(runId, 'dsa', 'analysis', dsaSummary);
     console.log(`  [analyzing] summary: ${dsaSummary.completed}/${dsaSummary.total_tasks} tasks, ${dsaSummary.coverage_pct.toFixed(0)}% coverage`);
+
+    // ── Store DSA summary in long-term memory (fire-and-forget) ──
+    memoryAdd(
+      runId, 'dsa', 'dsa-summary',
+      buildMemoryPayload(runId, 'dsa', 'analysis', dsaSummary, run.question_text, retailerNames),
+      retailerIds.length > 0 ? retailerIds : undefined
+    );
 
     // ── Finalize ──────────────────────────────────────────────────────
 
