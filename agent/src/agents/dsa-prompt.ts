@@ -70,6 +70,8 @@ ${retailerNames || 'No retailers configured.'}
 - Retailers covered: ${summary.retailers_covered.join(', ') || 'none'}${warningNote}
 ${memorySection}
 ## Available Tools
+Tools are registered as MCP tools. When calling them, use the prefixed name: \`mcp__dsa-tools__<tool>\` (e.g. \`mcp__dsa-tools__read_observations\`).
+
 - read_config — Read configuration tables (retailers, products, locations, etc.)
 - read_observations — Read observations collected for this run
 - read_candidates — Read SERP candidates collected for this run

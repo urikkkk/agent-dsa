@@ -65,6 +65,8 @@ No retailer agents are available. You MUST use the bootstrap procedure:
 Your first tool call MUST be web_search_fallback. Do NOT plan or summarize — call the tool immediately.`}
 
 ## Available Tools
+Tools are registered as MCP tools. When calling them, use the prefixed name: \`mcp__webops-tools__<tool>\` (e.g. \`mcp__webops-tools__serp_search\`).
+
 - serp_search — Search retailer SERP via WSA agent
 - pdp_fetch — Fetch product detail page via WSA agent
 - web_search_fallback — Tier 2: Nimble web search (when WSA unavailable)

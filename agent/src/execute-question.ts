@@ -186,12 +186,17 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
           step_name: 'collection',
           message: `Init: ${init.tools.length} tools, MCP servers: ${init.mcp_servers.map((s) => `${s.name}=${s.status}`).join(', ')}`,
         });
-        const disconnected = init.mcp_servers.filter((s) => s.status !== 'connected');
-        if (disconnected.length > 0) {
-          throw new Error(`WebOps MCP server(s) not connected: ${disconnected.map((s) => `${s.name}=${s.status}`).join(', ')}`);
+        // Only check our own MCP server, not unrelated session servers
+        const ownServer = init.mcp_servers.find((s) => s.name === 'webops-tools');
+        if (ownServer && ownServer.status !== 'connected') {
+          throw new Error(`WebOps MCP server not connected: webops-tools=${ownServer.status}`);
         }
-        if (init.tools.length === 0) {
-          throw new Error('WebOps init reported 0 tools — MCP server likely failed to register tools');
+        if (!ownServer) {
+          throw new Error('WebOps MCP server "webops-tools" not found in init');
+        }
+        const webOpsToolCount = init.tools.filter((t) => t.startsWith('mcp__webops-tools__')).length;
+        if (webOpsToolCount === 0) {
+          throw new Error('WebOps init reported 0 webops-tools — MCP server likely failed to register tools');
         }
       }
 
@@ -211,6 +216,12 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
               message: `turn ${webOpsTurnCounter}: ${tool}`,
             });
           }
+        } else {
+          const textContent = content
+            .filter((c) => c.type === 'text')
+            .map((c) => String(c.text ?? '').slice(0, 200))
+            .join(' ');
+          console.warn(`[webops] WARNING: text-only turn ${webOpsTurnCounter} (no tool calls): ${textContent}`);
         }
       }
 
@@ -373,12 +384,17 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
           step_name: 'analysis',
           message: `Init: ${init.tools.length} tools, MCP servers: ${init.mcp_servers.map((s) => `${s.name}=${s.status}`).join(', ')}`,
         });
-        const disconnected = init.mcp_servers.filter((s) => s.status !== 'connected');
-        if (disconnected.length > 0) {
-          throw new Error(`DSA MCP server(s) not connected: ${disconnected.map((s) => `${s.name}=${s.status}`).join(', ')}`);
+        // Only check our own MCP server, not unrelated session servers
+        const ownDsaServer = init.mcp_servers.find((s) => s.name === 'dsa-tools');
+        if (ownDsaServer && ownDsaServer.status !== 'connected') {
+          throw new Error(`DSA MCP server not connected: dsa-tools=${ownDsaServer.status}`);
         }
-        if (init.tools.length === 0) {
-          throw new Error('DSA init reported 0 tools — MCP server likely failed to register tools');
+        if (!ownDsaServer) {
+          throw new Error('DSA MCP server "dsa-tools" not found in init');
+        }
+        const dsaToolCount = init.tools.filter((t) => t.startsWith('mcp__dsa-tools__')).length;
+        if (dsaToolCount === 0) {
+          throw new Error('DSA init reported 0 dsa-tools — MCP server likely failed to register tools');
         }
       }
 
@@ -398,6 +414,12 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
               message: `turn ${dsaTurnCounter}: ${tool}`,
             });
           }
+        } else {
+          const textContent = content
+            .filter((c) => c.type === 'text')
+            .map((c) => String(c.text ?? '').slice(0, 200))
+            .join(' ');
+          console.warn(`[dsa] WARNING: text-only turn ${dsaTurnCounter} (no tool calls): ${textContent}`);
         }
       }
 

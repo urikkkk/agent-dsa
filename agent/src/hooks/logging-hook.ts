@@ -57,8 +57,10 @@ export function createLoggingHook(
         const toolResponse = hookInput.tool_response as Record<string, unknown> | undefined;
 
         // ── Tool-door violation check ──
+        // Strip MCP prefix (e.g. "mcp__webops-tools__serp_search" → "serp_search")
+        const baseName = toolName.replace(/^mcp__[^_]+__/, '');
         const allowedSet = ALLOWED_TOOLS[agentName];
-        if (allowedSet && !allowedSet.has(toolName)) {
+        if (allowedSet && !allowedSet.has(baseName)) {
           emitLedgerEvent({
             run_id: runId,
             event_type: 'tool_door_violation',
