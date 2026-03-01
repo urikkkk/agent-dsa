@@ -155,6 +155,8 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
 
     const webOpsTools = createWebOpsToolServer();
     let webOpsTurnCounter = 0;
+    const webOpsSeenMsgIds = new Set<string>();
+    const webOpsSeenToolUseIds = new Set<string>();
 
     for await (const message of query({
       prompt: webOpsUserPrompt,
@@ -172,20 +174,33 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
     })) {
       const msg = message as SDKMessage;
 
-      if (msg.type === 'assistant' && 'content' in msg) {
-        webOpsTurnCounter++;
-        const content = msg.content as Array<Record<string, unknown>>;
-        const toolUses = content
-          .filter((c) => c.type === 'tool_use')
-          .map((c) => c.name as string);
-        if (toolUses.length > 0) {
-          for (const tool of toolUses) {
+      // SDK yields { type: "assistant", message: { content: [...] } }
+      // One message per content block with the same message ID.
+      // We extract tool_use blocks and deduplicate by tool_use ID.
+      if (msg.type === 'assistant') {
+        const inner = (msg as Record<string, unknown>).message as
+          | { id?: string; content?: Array<Record<string, unknown>> }
+          | undefined;
+        const content = inner?.content;
+        if (Array.isArray(content)) {
+          const toolUses = content
+            .filter((c) => c.type === 'tool_use')
+            .filter((c) => !webOpsSeenToolUseIds.has(c.id as string));
+
+          for (const tu of toolUses) {
+            webOpsSeenToolUseIds.add(tu.id as string);
+            const toolName = tu.name as string;
+            // Count a new turn only on the first tool_use of a new message
+            if (inner?.id && !webOpsSeenMsgIds.has(inner.id)) {
+              webOpsSeenMsgIds.add(inner.id);
+              webOpsTurnCounter++;
+            }
             eventBus?.send({
               event_type: 'task_started',
               agent_name: 'webops',
               step_name: 'collection',
-              tool_name: tool,
-              message: `turn ${webOpsTurnCounter}: ${tool}`,
+              tool_name: toolName,
+              message: `turn ${webOpsTurnCounter}: ${toolName}`,
             });
           }
         }
@@ -306,6 +321,8 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
 
     const dsaTools = createDsaAnalysisToolServer();
     let dsaTurnCounter = 0;
+    const dsaSeenMsgIds = new Set<string>();
+    const dsaSeenToolUseIds = new Set<string>();
 
     for await (const message of query({
       prompt: dsaUserPrompt,
@@ -323,20 +340,29 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
     })) {
       const msg = message as SDKMessage;
 
-      if (msg.type === 'assistant' && 'content' in msg) {
-        dsaTurnCounter++;
-        const content = msg.content as Array<Record<string, unknown>>;
-        const toolUses = content
-          .filter((c) => c.type === 'tool_use')
-          .map((c) => c.name as string);
-        if (toolUses.length > 0) {
-          for (const tool of toolUses) {
+      if (msg.type === 'assistant') {
+        const inner = (msg as Record<string, unknown>).message as
+          | { id?: string; content?: Array<Record<string, unknown>> }
+          | undefined;
+        const content = inner?.content;
+        if (Array.isArray(content)) {
+          const toolUses = content
+            .filter((c) => c.type === 'tool_use')
+            .filter((c) => !dsaSeenToolUseIds.has(c.id as string));
+
+          for (const tu of toolUses) {
+            dsaSeenToolUseIds.add(tu.id as string);
+            const toolName = tu.name as string;
+            if (inner?.id && !dsaSeenMsgIds.has(inner.id)) {
+              dsaSeenMsgIds.add(inner.id);
+              dsaTurnCounter++;
+            }
             eventBus?.send({
               event_type: 'task_started',
               agent_name: 'dsa',
               step_name: 'analysis',
-              tool_name: tool,
-              message: `turn ${dsaTurnCounter}: ${tool}`,
+              tool_name: toolName,
+              message: `turn ${dsaTurnCounter}: ${toolName}`,
             });
           }
         }
