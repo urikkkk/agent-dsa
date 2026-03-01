@@ -1,0 +1,12 @@
+{
+  "name": "agent-dsa",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": ["shared", "agent", "web"],
+  "scripts": {
+    "agent": "npx tsx agent/src/index.ts",
+    "agent:cli": "npx tsx agent/src/cli.ts",
+    "db:push": "npx supabase db push",
+    "db:seed": "npx supabase db seed"
+  }
+}
