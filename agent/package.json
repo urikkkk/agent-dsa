@@ -5,7 +5,9 @@
   "type": "module",
   "scripts": {
     "start": "tsx src/index.ts",
-    "cli": "tsx src/cli.ts"
+    "cli": "tsx src/cli.ts",
+    "test": "vitest run",
+    "test:watch": "vitest"
   },
   "dependencies": {
     "@agent-dsa/shared": "*",
@@ -18,6 +20,7 @@
   "devDependencies": {
     "@types/node": "^22",
     "tsx": "^4.19.0",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^3.0.0"
   }
 }

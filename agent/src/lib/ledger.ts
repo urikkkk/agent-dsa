@@ -70,23 +70,26 @@ export async function storeArtifact(
       ? `ledger-artifacts/${runId}/${sha256.slice(0, 12)}.json`
       : null;
 
-    // Hash-first dedup: try insert, on conflict do nothing
-    const { data: inserted } = await db
+    // Hash-first dedup: upsert on sha256 unique index, ignore duplicates
+    const { data: upserted } = await db
       .from('ledger_artifacts')
-      .insert({
-        run_id: runId,
-        content_type: 'application/json',
-        payload: inlinePayload as Record<string, unknown> | null,
-        storage_ref: storageRef,
-        size_bytes: sizeBytes,
-        sha256,
-      })
+      .upsert(
+        {
+          run_id: runId,
+          content_type: 'application/json',
+          payload: inlinePayload as Record<string, unknown> | null,
+          storage_ref: storageRef,
+          size_bytes: sizeBytes,
+          sha256,
+        },
+        { onConflict: 'sha256', ignoreDuplicates: true }
+      )
       .select('id')
       .single();
 
-    if (inserted?.id) return inserted.id;
+    if (upserted?.id) return upserted.id;
 
-    // Conflict — artifact already exists, fetch its ID
+    // ignoreDuplicates returns no rows on conflict — look up existing
     const { data: existing } = await db
       .from('ledger_artifacts')
       .select('id')
@@ -270,7 +273,8 @@ export async function writeStepSummary(
   runId: string,
   agentName: AgentName,
   stepName: string,
-  summary: StepSummary
+  summary: StepSummary,
+  startedAt?: string
 ): Promise<void> {
   try {
     const db = getSupabase();
@@ -281,7 +285,7 @@ export async function writeStepSummary(
       step_type: stepType,
       agent_name: agentName,
       status: summary.failed > 0 ? 'completed_with_errors' : 'completed',
-      started_at: new Date().toISOString(),
+      started_at: startedAt ?? new Date().toISOString(),
       finished_at: new Date().toISOString(),
       request_count: summary.total_tasks,
       success_count: summary.completed,
@@ -414,26 +418,22 @@ export async function checkCompletionCriteria(
     return { isComplete: false, reason: 'No answer produced' };
   }
 
-  // Check for unresolved stuck tasks
-  const { data: startedEvents } = await db
+  // Check for unresolved stuck tasks using COUNT queries to avoid
+  // loading all events into memory for high-task-count runs.
+  const { count: startedCount } = await db
     .from('ledger_events')
-    .select('task_id, attempt')
+    .select('id', { count: 'exact', head: true })
     .eq('run_id', runId)
     .eq('status', 'started');
 
-  const { data: terminalEvents } = await db
+  const { count: terminalCount } = await db
     .from('ledger_events')
-    .select('task_id, attempt')
+    .select('id', { count: 'exact', head: true })
     .eq('run_id', runId)
     .in('status', ['completed', 'failed', 'skipped']);
 
-  const terminalSet = new Set(
-    (terminalEvents ?? []).map((e) => `${e.task_id}:${e.attempt}`)
-  );
-
-  const stuckCount = (startedEvents ?? []).filter(
-    (e) => !terminalSet.has(`${e.task_id}:${e.attempt}`)
-  ).length;
+  // Approximate stuck count: if more started than terminal, something is stuck
+  const stuckCount = Math.max(0, (startedCount ?? 0) - (terminalCount ?? 0));
 
   if (stuckCount > 0) {
     return { isComplete: false, reason: `${stuckCount} stuck tasks without terminal events` };

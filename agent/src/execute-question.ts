@@ -109,6 +109,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
   try {
     // ── Phase 1: WebOps Collection ────────────────────────────────────
 
+    const webOpsStartedAt = new Date().toISOString();
     await db
       .from('runs')
       .update({
@@ -195,7 +196,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
       });
     }
     webOpsSummary = await computeStepSummary(runId, 'webops', 'collection');
-    await writeStepSummary(runId, 'webops', 'collection', webOpsSummary);
+    await writeStepSummary(runId, 'webops', 'collection', webOpsSummary, webOpsStartedAt);
     eventBus?.send({
       event_type: 'step_summary',
       agent_name: 'webops',
@@ -237,6 +238,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
 
     // ── Phase 2: DSA Analysis ─────────────────────────────────────────
 
+    const dsaStartedAt = new Date().toISOString();
     await db
       .from('runs')
       .update({
@@ -341,7 +343,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
       });
     }
     dsaSummary = await computeStepSummary(runId, 'dsa', 'analysis');
-    await writeStepSummary(runId, 'dsa', 'analysis', dsaSummary);
+    await writeStepSummary(runId, 'dsa', 'analysis', dsaSummary, dsaStartedAt);
     eventBus?.send({
       event_type: 'step_summary',
       agent_name: 'dsa',
@@ -404,6 +406,16 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
         error: reason,
       };
     }
+
+    // Mark run as completed now that all post-processing is done
+    await db
+      .from('runs')
+      .update({
+        status: 'completed',
+        finished_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', runId);
 
     // Get the answer ID for the response
     const { data: answer } = await db

@@ -30,7 +30,7 @@ export class NimbleClient {
   private async request<T>(
     method: string,
     endpoint: string,
-    body: Record<string, unknown>,
+    body?: Record<string, unknown>,
     timeoutMs = DEFAULT_TIMEOUT
   ): Promise<T> {
     const controller = new AbortController();
@@ -44,7 +44,7 @@ export class NimbleClient {
           Authorization: `Bearer ${this.apiKey}`,
           Accept: 'application/json',
         },
-        body: JSON.stringify(body),
+        ...(body ? { body: JSON.stringify(body) } : {}),
         signal: controller.signal,
       });
 
@@ -151,57 +151,15 @@ export class NimbleClient {
   }
 
   async listAgents(): Promise<unknown[]> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT);
-    try {
-      const response = await fetch(`${this.baseUrl}/v1/agents/list`, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-          Accept: 'application/json',
-        },
-        signal: controller.signal,
-      });
-      if (!response.ok) {
-        throw new NimbleApiError(
-          response.status,
-          `Nimble API error: ${response.status}`,
-          ''
-        );
-      }
-      const data = await response.json();
-      return Array.isArray(data) ? data : (data as Record<string, unknown>).templates as unknown[] || [];
-    } finally {
-      clearTimeout(timer);
-    }
+    const data = await this.request<unknown>('GET', '/v1/agents/list');
+    return Array.isArray(data) ? data : (data as Record<string, unknown>).templates as unknown[] || [];
   }
 
   async getAgent(agentName: string): Promise<Record<string, unknown>> {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT);
-    try {
-      const response = await fetch(
-        `${this.baseUrl}/v1/agents/get?template_name=${encodeURIComponent(agentName)}`,
-        {
-          method: 'GET',
-          headers: {
-            Authorization: `Bearer ${this.apiKey}`,
-            Accept: 'application/json',
-          },
-          signal: controller.signal,
-        }
-      );
-      if (!response.ok) {
-        throw new NimbleApiError(
-          response.status,
-          `Nimble API error: ${response.status}`,
-          ''
-        );
-      }
-      return (await response.json()) as Record<string, unknown>;
-    } finally {
-      clearTimeout(timer);
-    }
+    return this.request<Record<string, unknown>>(
+      'GET',
+      `/v1/agents/get?template_name=${encodeURIComponent(agentName)}`
+    );
   }
 }
 

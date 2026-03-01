@@ -13,7 +13,10 @@ const POLL_INTERVAL_MS = parseInt(
   10
 );
 
+let isBusy = false;
+
 async function pollForPendingRuns(): Promise<void> {
+  if (isBusy) return;
   const db = getSupabase();
 
   // Find the oldest pending run
@@ -37,19 +40,24 @@ async function pollForPendingRuns(): Promise<void> {
   console.log(`\n--- Picking up run ${run.id} ---`);
   console.log(`Question: ${run.question_text || '(no question)'}`);
 
-  const eventBus = new RunEventBus(run.id);
-  eventBus.on('run_event', (e) => console.log(formatRunEvent(e)));
-  eventBus.startHeartbeat(10_000);
+  isBusy = true;
+  try {
+    const eventBus = new RunEventBus(run.id);
+    eventBus.on('run_event', (e) => console.log(formatRunEvent(e)));
+    eventBus.startHeartbeat(10_000);
 
-  const result = await executeQuestion(run.id, eventBus);
+    const result = await executeQuestion(run.id, eventBus);
 
-  if (result.success) {
-    console.log(`Run ${run.id} completed successfully`);
-    console.log(`  Answer ID: ${result.answerId}`);
-    console.log(`  Cost: $${result.totalCostUsd?.toFixed(4)}`);
-    console.log(`  Turns: ${result.numTurns}`);
-  } else {
-    console.error(`Run ${run.id} failed: ${result.error}`);
+    if (result.success) {
+      console.log(`Run ${run.id} completed successfully`);
+      console.log(`  Answer ID: ${result.answerId}`);
+      console.log(`  Cost: $${result.totalCostUsd?.toFixed(4)}`);
+      console.log(`  Turns: ${result.numTurns}`);
+    } else {
+      console.error(`Run ${run.id} failed: ${result.error}`);
+    }
+  } finally {
+    isBusy = false;
   }
 }
 
@@ -73,17 +81,29 @@ async function main(): Promise<void> {
     }
   }, POLL_INTERVAL_MS);
 
-  // Graceful shutdown
-  process.on('SIGINT', () => {
-    console.log('\nShutting down...');
+  // Graceful shutdown: wait for in-flight run to finish (up to 5 min)
+  let shuttingDown = false;
+  const gracefulShutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log('\nShutting down gracefully...');
     clearInterval(interval);
-    process.exit(0);
-  });
 
-  process.on('SIGTERM', () => {
-    clearInterval(interval);
+    if (isBusy) {
+      console.log('Waiting for in-flight run to finish (up to 5 min)...');
+      const deadline = Date.now() + 5 * 60 * 1000;
+      while (isBusy && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 2000));
+      }
+      if (isBusy) {
+        console.error('Timed out waiting for run — exiting anyway.');
+      }
+    }
     process.exit(0);
-  });
+  };
+
+  process.on('SIGINT', () => void gracefulShutdown());
+  process.on('SIGTERM', () => void gracefulShutdown());
 }
 
 main().catch((err) => {
