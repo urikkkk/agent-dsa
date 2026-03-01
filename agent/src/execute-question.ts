@@ -1,10 +1,20 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
-import { buildSystemPrompt } from './system-prompt.js';
-import { createDsaToolServer } from './tools/index.js';
+import { buildWebOpsPrompt } from './agents/webops-prompt.js';
+import { buildDsaPrompt } from './agents/dsa-prompt.js';
+import type { CollectionSummary } from './agents/dsa-prompt.js';
+import { createWebOpsToolServer, createDsaAnalysisToolServer } from './tools/index.js';
 import { createLoggingHook } from './hooks/logging-hook.js';
 import { getSupabase } from './lib/supabase.js';
-import type { Run, Location, Retailer, NimbleAgent } from '@agent-dsa/shared';
+import {
+  resolveStuckTasks,
+  computeStepSummary,
+  writeStepSummary,
+  checkCompletionCriteria,
+} from './lib/ledger.js';
+import { isMemoryEnabled, memorySearch, memoryAdd, buildMemoryPayload } from './lib/supermemory.js';
+import type { RunEventBus } from './lib/run-events.js';
+import type { Run, Location, Retailer, NimbleAgent, StepSummary } from '@agent-dsa/shared';
 
 interface ExecuteResult {
   success: boolean;
@@ -14,20 +24,11 @@ interface ExecuteResult {
   error?: string;
 }
 
-export async function executeQuestion(runId: string): Promise<ExecuteResult> {
+export async function executeQuestion(runId: string, eventBus?: RunEventBus): Promise<ExecuteResult> {
   const db = getSupabase();
 
-  // Mark run as running
-  await db
-    .from('runs')
-    .update({
-      status: 'running',
-      started_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    })
-    .eq('id', runId);
+  // ── Load run context ──────────────────────────────────────────────
 
-  // Load run context
   const { data: run, error: runErr } = await db
     .from('runs')
     .select('*')
@@ -51,11 +52,10 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
 
   // Load retailers with their agents
   const retailerIds: string[] = run.retailer_ids || [];
-  let retailers: Array<
+  const retailers: Array<
     Retailer & { serp_agent?: NimbleAgent; pdp_agent?: NimbleAgent }
   > = [];
 
-  // Load retailers
   const retailerQuery = retailerIds.length > 0
     ? db.from('retailers').select('*').in('id', retailerIds)
     : db.from('retailers').select('*').eq('is_active', true);
@@ -63,7 +63,6 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
   const { data: retailerRows } = await retailerQuery;
 
   if (retailerRows && retailerRows.length > 0) {
-    // Collect all agent IDs and batch-load in a single query
     const allAgentIds = [
       ...new Set(
         retailerRows
@@ -96,76 +95,271 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
     }
   }
 
-  // Build system prompt
-  const systemPrompt = buildSystemPrompt({
-    run: run as Run,
-    location,
-    retailers,
-  });
-
-  // Build the user prompt
-  const userPrompt = run.question_text
-    ? `Run ${runId}: ${run.question_text}\n\nAll retailer agents are in your system prompt. Use the fast path — serp_search → pdp_fetch → write_observation → write_answer. Do not call read_config or find_wsa_template.`
-    : `Run ${runId}. No specific question provided — call read_config to discover what data to collect, then follow the fast path.`;
-
-  // Create tools MCP server
-  const dsaTools = createDsaToolServer();
-
-  // Create logging hook
-  const loggingHook = createLoggingHook(runId);
-
   const model = process.env.AGENT_MODEL || 'claude-sonnet-4-6';
-  const maxTurns = parseInt(process.env.AGENT_MAX_TURNS || '30', 10);
+  const webOpsMaxTurns = parseInt(process.env.WEBOPS_MAX_TURNS || '20', 10);
+  const dsaMaxTurns = parseInt(process.env.DSA_MAX_TURNS || '10', 10);
+  const webOpsHook = createLoggingHook(runId, 'webops', 'collection', eventBus);
+  const dsaHook = createLoggingHook(runId, 'dsa', 'analysis', eventBus);
+
+  let totalCostUsd = 0;
+  let totalTurns = 0;
+  let webOpsSummary: StepSummary | undefined;
+  let dsaSummary: StepSummary | undefined;
 
   try {
-    let totalCostUsd = 0;
-    let numTurns = 0;
-    let resultText = '';
-    let turnCounter = 0;
+    // ── Phase 1: WebOps Collection ────────────────────────────────────
+
+    await db
+      .from('runs')
+      .update({
+        status: 'collecting',
+        started_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', runId);
+
+    eventBus?.send({
+      event_type: 'step_started',
+      agent_name: 'webops',
+      step_name: 'collection',
+      message: 'Starting WebOps data collection',
+    });
+
+    const webOpsPrompt = buildWebOpsPrompt({
+      run: run as Run,
+      location,
+      retailers,
+    });
+
+    const webOpsUserPrompt = run.question_text
+      ? `Collect data for run ${runId}: ${run.question_text}\n\nAll retailer agents are in your system prompt. Use the fast path — serp_search → pdp_fetch → write_observation. Collect from ALL target retailers.`
+      : `Run ${runId}. No specific question — use find_wsa_template to discover agents, then collect broadly.`;
+
+    const webOpsTools = createWebOpsToolServer();
+    let webOpsTurnCounter = 0;
 
     for await (const message of query({
-      prompt: userPrompt,
+      prompt: webOpsUserPrompt,
       options: {
         model,
-        maxTurns,
-        systemPrompt,
+        maxTurns: webOpsMaxTurns,
+        systemPrompt: webOpsPrompt,
         permissionMode: 'bypassPermissions',
         allowDangerouslySkipPermissions: true,
-        mcpServers: { 'dsa-tools': dsaTools },
+        mcpServers: { 'webops-tools': webOpsTools },
         hooks: {
-          PostToolUse: [{ hooks: [loggingHook] }],
+          PostToolUse: [{ hooks: [webOpsHook] }],
         },
       },
     })) {
       const msg = message as SDKMessage;
 
-      // Print turn-by-turn progress for debugging
       if (msg.type === 'assistant' && 'content' in msg) {
-        turnCounter++;
+        webOpsTurnCounter++;
         const content = msg.content as Array<Record<string, unknown>>;
         const toolUses = content
           .filter((c) => c.type === 'tool_use')
           .map((c) => c.name as string);
         if (toolUses.length > 0) {
-          console.log(`  [turn ${turnCounter}] ${toolUses.join(', ')}`);
+          for (const tool of toolUses) {
+            eventBus?.send({
+              event_type: 'task_started',
+              agent_name: 'webops',
+              step_name: 'collection',
+              tool_name: tool,
+              message: `turn ${webOpsTurnCounter}: ${tool}`,
+            });
+          }
         }
       }
 
       if (msg.type === 'result') {
         const result = msg as Extract<SDKMessage, { type: 'result' }>;
         if ('total_cost_usd' in result) {
-          totalCostUsd = result.total_cost_usd;
+          totalCostUsd += (result as Record<string, unknown>).total_cost_usd as number;
         }
         if ('num_turns' in result) {
-          numTurns = result.num_turns;
-        }
-        if ('result' in result && typeof result.result === 'string') {
-          resultText = result.result;
+          totalTurns += (result as Record<string, unknown>).num_turns as number;
         }
       }
     }
 
-    // Update run with cost
+    // ── WebOps step summary ───────────────────────────────────────────
+    const webOpsTimedOut = await resolveStuckTasks(runId, 'webops', 'collection');
+    if (webOpsTimedOut > 0) {
+      eventBus?.send({
+        event_type: 'skipped',
+        agent_name: 'webops',
+        step_name: 'collection',
+        message: `Watchdog: ${webOpsTimedOut} stuck tasks timed out`,
+      });
+    }
+    webOpsSummary = await computeStepSummary(runId, 'webops', 'collection');
+    await writeStepSummary(runId, 'webops', 'collection', webOpsSummary);
+    eventBus?.send({
+      event_type: 'step_summary',
+      agent_name: 'webops',
+      step_name: 'collection',
+      message: `Collection complete: ${webOpsSummary.completed}/${webOpsSummary.total_tasks} tasks`,
+      summary: webOpsSummary,
+    });
+
+    // ── Store WebOps summary in long-term memory (fire-and-forget) ──
+    const retailerNames = retailers.map((r) => r.name);
+    memoryAdd(
+      runId, 'webops', 'webops-summary',
+      buildMemoryPayload(runId, 'webops', 'collection', webOpsSummary, run.question_text, retailerNames),
+      retailerIds.length > 0 ? retailerIds : undefined
+    );
+
+    // ── Build collection summary ──────────────────────────────────────
+
+    const { data: observations } = await db
+      .from('observations')
+      .select('*')
+      .eq('run_id', runId);
+
+    const { data: candidates } = await db
+      .from('serp_candidates')
+      .select('id')
+      .eq('run_id', runId);
+
+    const collectionSummary: CollectionSummary = {
+      observation_count: observations?.length ?? 0,
+      candidate_count: candidates?.length ?? 0,
+      retailers_covered: [
+        ...new Set(observations?.map((o) => o.retailer_id as string) ?? []),
+      ],
+      has_validation_warnings: observations?.some(
+        (o) => o.validation_status === 'warn'
+      ) ?? false,
+    };
+
+    // ── Phase 2: DSA Analysis ─────────────────────────────────────────
+
+    await db
+      .from('runs')
+      .update({
+        status: 'analyzing',
+        updated_at: new Date().toISOString(),
+      })
+      .eq('id', runId);
+
+    eventBus?.send({
+      event_type: 'step_started',
+      agent_name: 'dsa',
+      step_name: 'analysis',
+      message: 'Starting DSA analysis',
+    });
+
+    // ── Memory retrieval (best-effort) ────────────────────────────
+    let priorKnowledge = '';
+    if (isMemoryEnabled() && run.question_text) {
+      priorKnowledge = await memorySearch(
+        runId,
+        run.question_text,
+        retailerIds.length > 0 ? retailerIds : undefined
+      );
+      if (priorKnowledge) {
+        eventBus?.send({
+          event_type: 'task_completed',
+          agent_name: 'dsa',
+          step_name: 'analysis',
+          tool_name: 'memory_search',
+          message: `Retrieved ${priorKnowledge.split('\n').length} prior insights`,
+        });
+      }
+    }
+
+    const dsaPrompt = buildDsaPrompt(
+      { run: run as Run, location, retailers },
+      collectionSummary,
+      priorKnowledge
+    );
+
+    const dsaUserPrompt = run.question_text
+      ? `Analyze collected data and answer: ${run.question_text}\n\nRun ID: ${runId}. Read the observations, compute the answer, and call write_answer.`
+      : `Run ${runId}. Analyze all collected observations and write a summary answer.`;
+
+    const dsaTools = createDsaAnalysisToolServer();
+    let dsaTurnCounter = 0;
+
+    for await (const message of query({
+      prompt: dsaUserPrompt,
+      options: {
+        model,
+        maxTurns: dsaMaxTurns,
+        systemPrompt: dsaPrompt,
+        permissionMode: 'bypassPermissions',
+        allowDangerouslySkipPermissions: true,
+        mcpServers: { 'dsa-tools': dsaTools },
+        hooks: {
+          PostToolUse: [{ hooks: [dsaHook] }],
+        },
+      },
+    })) {
+      const msg = message as SDKMessage;
+
+      if (msg.type === 'assistant' && 'content' in msg) {
+        dsaTurnCounter++;
+        const content = msg.content as Array<Record<string, unknown>>;
+        const toolUses = content
+          .filter((c) => c.type === 'tool_use')
+          .map((c) => c.name as string);
+        if (toolUses.length > 0) {
+          for (const tool of toolUses) {
+            eventBus?.send({
+              event_type: 'task_started',
+              agent_name: 'dsa',
+              step_name: 'analysis',
+              tool_name: tool,
+              message: `turn ${dsaTurnCounter}: ${tool}`,
+            });
+          }
+        }
+      }
+
+      if (msg.type === 'result') {
+        const result = msg as Extract<SDKMessage, { type: 'result' }>;
+        if ('total_cost_usd' in result) {
+          totalCostUsd += (result as Record<string, unknown>).total_cost_usd as number;
+        }
+        if ('num_turns' in result) {
+          totalTurns += (result as Record<string, unknown>).num_turns as number;
+        }
+      }
+    }
+
+    // ── DSA step summary ──────────────────────────────────────────────
+    const dsaTimedOut = await resolveStuckTasks(runId, 'dsa', 'analysis');
+    if (dsaTimedOut > 0) {
+      eventBus?.send({
+        event_type: 'skipped',
+        agent_name: 'dsa',
+        step_name: 'analysis',
+        message: `Watchdog: ${dsaTimedOut} stuck tasks timed out`,
+      });
+    }
+    dsaSummary = await computeStepSummary(runId, 'dsa', 'analysis');
+    await writeStepSummary(runId, 'dsa', 'analysis', dsaSummary);
+    eventBus?.send({
+      event_type: 'step_summary',
+      agent_name: 'dsa',
+      step_name: 'analysis',
+      message: `Analysis complete: ${dsaSummary.completed}/${dsaSummary.total_tasks} tasks`,
+      summary: dsaSummary,
+    });
+
+    // ── Store DSA summary in long-term memory (fire-and-forget) ──
+    memoryAdd(
+      runId, 'dsa', 'dsa-summary',
+      buildMemoryPayload(runId, 'dsa', 'analysis', dsaSummary, run.question_text, retailerNames),
+      retailerIds.length > 0 ? retailerIds : undefined
+    );
+
+    // ── Finalize ──────────────────────────────────────────────────────
+
+    // Update run with total cost
     await db
       .from('runs')
       .update({
@@ -174,7 +368,44 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
       })
       .eq('id', runId);
 
-    // Check if the agent wrote an answer
+    // Check completion criteria (answer exists, no stuck tasks, summaries written)
+    const { isComplete, reason } = await checkCompletionCriteria(runId);
+
+    if (!isComplete) {
+      await db
+        .from('runs')
+        .update({
+          status: 'completed_with_errors',
+          finished_at: new Date().toISOString(),
+          summary: reason,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', runId);
+
+      eventBus?.send({
+        event_type: 'run_complete',
+        agent_name: 'dsa',
+        step_name: 'analysis',
+        message: `Run completed with errors: ${reason}`,
+        final: {
+          success: false,
+          total_cost_usd: totalCostUsd,
+          num_turns: totalTurns,
+          webops_summary: webOpsSummary,
+          dsa_summary: dsaSummary,
+        },
+      });
+      eventBus?.dispose();
+
+      return {
+        success: false,
+        totalCostUsd,
+        numTurns: totalTurns,
+        error: reason,
+      };
+    }
+
+    // Get the answer ID for the response
     const { data: answer } = await db
       .from('answers')
       .select('id')
@@ -182,36 +413,31 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
       .limit(1)
       .single();
 
-    if (!answer) {
-      // Agent finished but didn't write an answer — mark as completed with errors
-      await db
-        .from('runs')
-        .update({
-          status: 'completed_with_errors',
-          finished_at: new Date().toISOString(),
-          summary: resultText || 'Agent completed but did not produce an answer',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', runId);
-
-      return {
-        success: false,
-        totalCostUsd,
-        numTurns,
-        error: 'Agent did not produce an answer',
-      };
-    }
+    eventBus?.send({
+      event_type: 'run_complete',
+      agent_name: 'dsa',
+      step_name: 'analysis',
+      message: 'Run completed successfully',
+      final: {
+        success: true,
+        answer_id: answer?.id,
+        total_cost_usd: totalCostUsd,
+        num_turns: totalTurns,
+        webops_summary: webOpsSummary,
+        dsa_summary: dsaSummary,
+      },
+    });
+    eventBus?.dispose();
 
     return {
       success: true,
-      answerId: answer.id,
+      answerId: answer?.id,
       totalCostUsd,
-      numTurns,
+      numTurns: totalTurns,
     };
   } catch (err) {
     const errorMsg = err instanceof Error ? err.message : String(err);
 
-    // Mark run as failed
     await db
       .from('runs')
       .update({
@@ -228,6 +454,22 @@ export async function executeQuestion(runId: string): Promise<ExecuteResult> {
       error_message: errorMsg,
       error_type: 'agent_execution',
     });
+
+    eventBus?.send({
+      event_type: 'run_complete',
+      agent_name: 'dsa',
+      step_name: 'analysis',
+      message: `Run failed: ${errorMsg}`,
+      error: { code: 'AGENT_ERROR', message: errorMsg },
+      final: {
+        success: false,
+        total_cost_usd: totalCostUsd,
+        num_turns: totalTurns,
+        webops_summary: webOpsSummary,
+        dsa_summary: dsaSummary,
+      },
+    });
+    eventBus?.dispose();
 
     return { success: false, error: errorMsg };
   }

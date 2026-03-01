@@ -1,8 +1,9 @@
 import { z } from 'zod';
 import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { getNimbleClient } from '../lib/nimble-client.js';
-import { withRetry } from '../lib/retry.js';
+import { withRetry, isCircuitOpen } from '../lib/retry.js';
 import { getSupabase } from '../lib/supabase.js';
+import { generateTaskId, getAttemptNumber, emitLedgerEvent } from '../lib/ledger.js';
 
 export const urlExtractFallbackTool = tool(
   'url_extract_fallback',
@@ -21,6 +22,39 @@ export const urlExtractFallbackTool = tool(
     const nimble = getNimbleClient();
     const db = getSupabase();
     const startTime = Date.now();
+
+    // ── Ledger: started event + circuit breaker ──
+    const taskId = generateTaskId(args.run_id ?? '', args.retailer_id ?? '', 'url_extract_fallback', args.url);
+    const attempt = await getAttemptNumber(taskId);
+
+    const cbKey = `${args.retailer_id}:url_extract_fallback`;
+    if (isCircuitOpen(cbKey)) {
+      void emitLedgerEvent({
+        run_id: args.run_id ?? '',
+        event_type: 'task',
+        agent_name: 'webops',
+        step_name: 'collection',
+        task_id: taskId,
+        attempt,
+        status: 'skipped',
+        tool_name: 'url_extract_fallback',
+        error: { code: 'CIRCUIT_OPEN', message: `Circuit open for ${cbKey}` },
+        next_action_hint: 'skip',
+      });
+      return { content: [{ type: 'text' as const, text: JSON.stringify({ success: false, error: 'circuit_open' }) }] };
+    }
+
+    emitLedgerEvent({
+      run_id: args.run_id ?? '',
+      event_type: 'task',
+      agent_name: 'webops',
+      step_name: 'collection',
+      task_id: taskId,
+      attempt,
+      status: 'started',
+      tool_name: 'url_extract_fallback',
+      provenance: { url: args.url, collection_tier: 'search_extract' },
+    });
 
     let requestId: string | undefined;
     if (args.run_id) {

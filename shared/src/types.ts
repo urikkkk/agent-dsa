@@ -15,6 +15,8 @@ export type ProductCategory =
 
 export type RunStatus =
   | 'pending'
+  | 'collecting'
+  | 'analyzing'
   | 'running'
   | 'completed'
   | 'completed_with_errors'
@@ -378,6 +380,103 @@ export interface AgentLog {
   cost_usd?: number;
   duration_ms?: number;
   created_at: string;
+}
+
+// --- Ledger / Observability ---
+
+export type AgentName = 'webops' | 'dsa';
+
+export type LedgerEventStatus = 'started' | 'completed' | 'failed' | 'skipped' | 'retrying';
+
+export type LedgerEventType = 'task' | 'step' | 'tool_door_violation' | 'watchdog_timeout';
+
+export type NextActionHint = 'retry' | 'fallback' | 'skip' | 'abort';
+
+export interface LedgerEvent {
+  id: string;
+  run_id: string;
+  event_type: LedgerEventType;
+  agent_name: AgentName;
+  step_name: string;
+  task_id: string;
+  attempt: number;
+  status: LedgerEventStatus;
+  span_id: string;
+  parent_span_id?: string;
+  tool_name?: string;
+  input_ref?: string;
+  output_ref?: string;
+  error?: { code: string; message: string; stack?: string };
+  metrics?: { latency_ms?: number; tokens?: { input: number; output: number }; cost_usd?: number };
+  provenance?: Record<string, unknown>;
+  next_action_hint?: NextActionHint;
+  created_at: string;
+}
+
+export interface LedgerArtifact {
+  id: string;
+  run_id: string;
+  content_type: string;
+  payload?: Record<string, unknown>;
+  storage_ref?: string;
+  size_bytes?: number;
+  sha256?: string;
+  created_at: string;
+}
+
+// --- Run Event Streaming ---
+
+export type RunEventType =
+  | 'step_started'
+  | 'step_summary'
+  | 'task_started'
+  | 'task_completed'
+  | 'task_failed'
+  | 'retrying'
+  | 'skipped'
+  | 'heartbeat'
+  | 'run_complete';
+
+export interface RunEvent {
+  timestamp: string;
+  run_id: string;
+  event_type: RunEventType;
+  agent_name: AgentName;
+  step_name: string;
+  tool_name?: string;
+  task_id?: string;
+  attempt?: number;
+  status?: LedgerEventStatus;
+  message: string;
+  error?: { code: string; message: string };
+  next_action_hint?: NextActionHint;
+  summary?: StepSummary;
+  final?: {
+    success: boolean;
+    answer_id?: string;
+    total_cost_usd?: number;
+    num_turns?: number;
+    webops_summary?: StepSummary;
+    dsa_summary?: StepSummary;
+  };
+}
+
+export interface StepSummary {
+  total_tasks: number;
+  completed: number;
+  failed: number;
+  skipped: number;
+  coverage_pct: number;
+  fallback_rate: number;
+  validation_breakdown: { pass: number; warn: number; fail: number };
+  error_clusters: Array<{ code: string; count: number; sample_task_id: string }>;
+  rerun_plan: Array<{ task_id: string; next_action_hint: NextActionHint; reason: string }>;
+}
+
+export interface CircuitBreakerState {
+  failures: number;
+  lastFailure: number;
+  isOpen: boolean;
 }
 
 export interface AuditEvent {
