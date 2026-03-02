@@ -1,0 +1,45 @@
+name: Auto PR
+
+on:
+  push:
+    branches-ignore: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  auto-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create PR and arm auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${GITHUB_REF_NAME}"
+
+          # Derive title from branch name: feat/add-caching → feat/add caching
+          TITLE="${BRANCH//\// / }"
+          TITLE="${TITLE//-/ }"
+
+          # Check if PR already exists for this branch
+          EXISTING=$(gh pr list --head "$BRANCH" --json number --jq '.[0].number')
+
+          if [ -z "$EXISTING" ]; then
+            echo "Creating PR for branch $BRANCH"
+            PR_URL=$(gh pr create \
+              --title "$TITLE" \
+              --body-file .github/pull_request_template.md \
+              --head "$BRANCH" \
+              --base main)
+            echo "Created: $PR_URL"
+          else
+            echo "PR #$EXISTING already exists for $BRANCH"
+            PR_URL="$EXISTING"
+          fi
+
+          # Arm auto-merge (squash)
+          gh pr merge "$BRANCH" --auto --squash
+          echo "Auto-merge armed"
