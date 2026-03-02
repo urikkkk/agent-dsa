@@ -92,6 +92,7 @@ Tools are registered as MCP tools. When calling them, use the prefixed name: \`m
 ## Key Rules
 - You MUST call a tool on every turn. Never respond with only text.
 - Always pass run_id and retailer_id to every tool call.
+- Only pass location_id to write_observation when a location is set. Omit it for national/online pricing.
 - Use the location's ZIP code when the retailer supports location-based pricing.
 - WSA calls (serp_search, pdp_fetch) take 10-120 seconds — this is normal.
 - Include source URLs, confidence scores (0-1), and collection_tier ('wsa' or 'search_extract').

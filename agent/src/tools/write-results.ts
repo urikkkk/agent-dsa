@@ -9,7 +9,7 @@ export const writeObservationTool = tool(
   {
     run_id: z.string().describe('Run ID'),
     retailer_id: z.string().describe('Retailer UUID'),
-    location_id: z.string().describe('Location UUID'),
+    location_id: z.string().optional().describe('Location UUID (omit for national/online pricing)'),
     product_id: z.string().optional().describe('Matched product UUID'),
     product_match_id: z.string().optional(),
     shelf_price: z.number().optional(),
