@@ -2,8 +2,9 @@ import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import { buildWebOpsPrompt } from './agents/webops-prompt.js';
 import { buildDsaPrompt } from './agents/dsa-prompt.js';
+import { buildPlannerPrompt } from './agents/planner-prompt.js';
 import type { CollectionSummary } from './agents/dsa-prompt.js';
-import { createWebOpsToolServer, createDsaAnalysisToolServer } from './tools/index.js';
+import { createWebOpsToolServer, createDsaAnalysisToolServer, createPlannerToolServer } from './tools/index.js';
 import { createLoggingHook } from './hooks/logging-hook.js';
 import { getSupabase, withTimeout } from './lib/supabase.js';
 import {
@@ -21,7 +22,7 @@ import {
   buildSummaryMetadata,
 } from './lib/supermemory.js';
 import type { RunEventBus } from './lib/run-events.js';
-import type { Run, Location, Retailer, NimbleAgent, StepSummary } from '@agent-dsa/shared';
+import type { Run, Location, Retailer, NimbleAgent, StepSummary, CollectionPlan } from '@agent-dsa/shared';
 
 interface ExecuteResult {
   success: boolean;
@@ -33,7 +34,7 @@ interface ExecuteResult {
 
 export async function executeQuestion(runId: string, eventBus?: RunEventBus): Promise<ExecuteResult> {
   const db = getSupabase();
-  const overallTimeoutMs = parseInt(process.env.OVERALL_TIMEOUT_MS || '1200000', 10);
+  const overallTimeoutMs = parseInt(process.env.OVERALL_TIMEOUT_MS || '2700000', 10);
 
   // Mutable state shared between inner function (via closure) and outer error handler
   let totalCostUsd = 0;
@@ -132,6 +133,200 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
     const webOpsHook = createLoggingHook(runId, 'webops', 'collection', eventBus);
     const dsaHook = createLoggingHook(runId, 'dsa', 'analysis', eventBus);
 
+    // ── Phase watchdog: activity-aware timeout ────────────────────────
+    interface PhaseWatchdogConfig {
+      phaseName: string;
+      hardTimeoutMs: number;      // absolute maximum (existing env-var caps)
+      inactivityMs: number;       // rolling window — reset on each tool call
+      stuckThreshold: number;     // consecutive identical calls before abort
+    }
+
+    interface PhaseWatchdog {
+      abort: AbortController;
+      recordToolUse(toolName: string, toolInput: unknown): 'ok' | 'stuck';
+      dispose(): void;
+    }
+
+    function createPhaseWatchdog(config: PhaseWatchdogConfig): PhaseWatchdog {
+      const { phaseName, hardTimeoutMs, inactivityMs, stuckThreshold } = config;
+      const abort = new AbortController();
+      let lastActivityTime = Date.now();
+
+      // Hard timeout (safety net)
+      const hardTimer = setTimeout(() => {
+        console.warn(`[${phaseName}] Hard timeout reached (${hardTimeoutMs}ms), aborting`);
+        abort.abort();
+      }, hardTimeoutMs);
+
+      // Rolling inactivity check
+      const pollInterval = Math.min(10_000, Math.floor(inactivityMs / 3));
+      const inactivityTimer = setInterval(() => {
+        const idleMs = Date.now() - lastActivityTime;
+        if (idleMs >= inactivityMs) {
+          console.warn(`[${phaseName}] Inactive for ${Math.round(idleMs / 1000)}s — aborting`);
+          abort.abort();
+        }
+      }, pollInterval);
+
+      // Stuck-loop tracking
+      let lastFingerprint = '';
+      let repeatCount = 0;
+
+      function recordToolUse(toolName: string, toolInput: unknown): 'ok' | 'stuck' {
+        lastActivityTime = Date.now();
+        const fingerprint = toolName + ':' + JSON.stringify(toolInput, Object.keys((toolInput ?? {}) as Record<string, unknown>).sort());
+        if (fingerprint === lastFingerprint) {
+          repeatCount++;
+          if (repeatCount >= stuckThreshold) {
+            console.warn(`[${phaseName}] Stuck loop detected: ${toolName} called ${repeatCount} times with identical input — aborting`);
+            abort.abort();
+            return 'stuck';
+          }
+        } else {
+          lastFingerprint = fingerprint;
+          repeatCount = 1;
+        }
+        return 'ok';
+      }
+
+      function dispose() {
+        clearTimeout(hardTimer);
+        clearInterval(inactivityTimer);
+      }
+
+      return { abort, recordToolUse, dispose };
+    }
+
+    // ── Phase 0: Planner ──────────────────────────────────────────────
+
+    let plan: CollectionPlan | null = null;
+
+    if (run.question_text) {
+      await withTimeout(
+        db
+          .from('runs')
+          .update({
+            status: 'planning',
+            started_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', runId),
+        10_000,
+        'status update: planning'
+      );
+
+      eventBus?.send({
+        event_type: 'step_started',
+        agent_name: 'planner',
+        step_name: 'planning',
+        message: 'Starting planner agent',
+      });
+
+      const plannerHook = createLoggingHook(runId, 'planner', 'planning', eventBus);
+      const plannerPrompt = buildPlannerPrompt({
+        run: run as Run,
+        location,
+        retailers,
+      });
+
+      const plannerToolServer = createPlannerToolServer();
+      const retailerNames = retailers.map((r) => r.name).join(', ');
+
+      const plannerUserPrompt = `Plan data collection for: ${run.question_text}\n\nTarget retailers: ${retailerNames || 'none configured'}. Read the config tables to understand what's available, then submit_plan.`;
+
+      const plannerWatchdog = createPhaseWatchdog({
+        phaseName: 'planner',
+        hardTimeoutMs: 60_000,
+        inactivityMs: parseInt(process.env.PLANNER_INACTIVITY_MS || '30000', 10),
+        stuckThreshold: 3,
+      });
+
+      try {
+        for await (const message of query({
+          prompt: plannerUserPrompt,
+          options: {
+            model,
+            maxTurns: 5,
+            systemPrompt: plannerPrompt,
+            tools: [],
+            permissionMode: 'bypassPermissions',
+            allowDangerouslySkipPermissions: true,
+            mcpServers: { 'planner-tools': plannerToolServer.server },
+            abortController: plannerWatchdog.abort,
+            hooks: {
+              PostToolUse: [{ hooks: [plannerHook] }],
+            },
+          },
+        })) {
+          const msg = message as SDKMessage;
+
+          if (msg.type === 'system' && 'subtype' in msg && msg.subtype === 'init') {
+            const init = msg as Extract<SDKMessage, { type: 'system'; subtype: 'init' }>;
+            console.log(`[planner] init: model=${init.model}, tools=[${init.tools.join(', ')}] (${init.tools.length})`);
+          }
+
+          if (msg.type === 'assistant' && 'content' in msg) {
+            const content = msg.content as Array<Record<string, unknown>>;
+            const toolUseCalls = content
+              .filter((c) => c.type === 'tool_use')
+              .map((c) => ({ name: c.name as string, input: c.input }));
+            if (toolUseCalls.length > 0) {
+              for (const call of toolUseCalls) {
+                const status = plannerWatchdog.recordToolUse(call.name, call.input);
+                eventBus?.send({
+                  event_type: 'task_started',
+                  agent_name: 'planner',
+                  step_name: 'planning',
+                  tool_name: call.name,
+                  message: `planner: ${call.name}`,
+                });
+                if (status === 'stuck') break;
+              }
+            }
+          }
+
+          if (msg.type === 'result') {
+            const result = msg as Record<string, unknown>;
+            if ('total_cost_usd' in result) {
+              totalCostUsd += result.total_cost_usd as number;
+            }
+            if ('num_turns' in result) {
+              totalTurns += result.num_turns as number;
+            }
+          }
+        }
+      } finally {
+        plannerWatchdog.dispose();
+      }
+
+      // Resolve stuck tasks + compute step summary for planner
+      await withTimeout(
+        resolveStuckTasks(runId, 'planner', 'planning'),
+        30_000,
+        'resolveStuckTasks: planner'
+      );
+      const plannerSummary = await withTimeout(
+        computeStepSummary(runId, 'planner', 'planning'),
+        30_000,
+        'computeStepSummary: planner'
+      );
+
+      eventBus?.send({
+        event_type: 'step_summary',
+        agent_name: 'planner',
+        step_name: 'planning',
+        message: `Planning complete: ${plannerSummary.completed}/${plannerSummary.total_tasks} tasks`,
+        summary: plannerSummary,
+      });
+
+      plan = plannerToolServer.getPlan();
+      if (plan) {
+        console.log(`[planner] Plan submitted: type=${plan.question_type}, keywords=${plan.keywords.length}, retailers=${plan.retailers.length}`);
+      } else {
+        console.warn('[planner] No plan submitted — falling back to unplanned collection');
+      }
+    }
+
     // ── Phase 1: WebOps Collection ────────────────────────────────────
 
     const webOpsStartedAt = new Date().toISOString();
@@ -140,7 +335,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
         .from('runs')
         .update({
           status: 'collecting',
-          started_at: new Date().toISOString(),
+          ...(!plan ? { started_at: new Date().toISOString() } : {}),
           updated_at: new Date().toISOString(),
         })
         .eq('id', runId),
@@ -159,6 +354,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
       run: run as Run,
       location,
       retailers,
+      plan: plan ?? undefined,
     });
 
     const hasConfiguredRetailers = retailers.length > 0;
@@ -167,8 +363,12 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
     if (!run.question_text) {
       // No question — discover broadly
       webOpsUserPrompt = `Run ${runId}. No specific question — use find_wsa_template to discover agents, then collect broadly.`;
+    } else if (plan && hasConfiguredRetailers) {
+      // Planned path — follow the planner's collection plan
+      const firstKeyword = plan.keywords[0]?.keyword ?? run.question_text;
+      webOpsUserPrompt = `Collect data for run ${runId}: ${run.question_text}\n\nA collection plan is in your system prompt. Follow it — start with keyword "${firstKeyword}" on the highest-priority retailer. Execute keywords in priority order. Start NOW.`;
     } else if (hasConfiguredRetailers) {
-      // Happy path — retailers available
+      // Happy path — retailers available but no plan
       webOpsUserPrompt = `Collect data for run ${runId}: ${run.question_text}\n\nAll ${retailers.length} retailer agents are listed in your system prompt. Use the fast path — serp_search → pdp_fetch → write_observation. Start NOW.`;
     } else {
       // Bootstrap — no retailers
@@ -178,31 +378,13 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
     const webOpsTools = createWebOpsToolServer();
     let webOpsTurnCounter = 0;
     let webOpsConsecutiveTextOnlyTurns = 0;
-    let webOpsHasWrittenObservation = false;
-    let webOpsLastToolUseTime = Date.now();
 
-    // ── Phase timeout via AbortController ──
-    const webOpsTimeoutMs = parseInt(process.env.WEBOPS_TIMEOUT_MS || '300000', 10);
-    const webOpsAbort = new AbortController();
-    const webOpsTimer = setTimeout(() => {
-      console.warn(`[webops] Phase timeout reached (${webOpsTimeoutMs}ms), aborting`);
-      webOpsAbort.abort();
-    }, webOpsTimeoutMs);
-
-    // ── Inactivity timer: abort if no tool call for 90s after first observation ──
-    const WEBOPS_IDLE_MS = 90_000;
-    let webOpsIdleTimer: ReturnType<typeof setInterval> | undefined;
-    const startWebOpsIdleWatch = () => {
-      if (webOpsIdleTimer) return;
-      webOpsIdleTimer = setInterval(() => {
-        const idleMs = Date.now() - webOpsLastToolUseTime;
-        if (idleMs >= WEBOPS_IDLE_MS) {
-          console.warn(`[webops] Idle for ${Math.round(idleMs / 1000)}s after writing observations — aborting`);
-          webOpsAbort.abort();
-          if (webOpsIdleTimer) clearInterval(webOpsIdleTimer);
-        }
-      }, 10_000);
-    };
+    const webOpsWatchdog = createPhaseWatchdog({
+      phaseName: 'webops',
+      hardTimeoutMs: parseInt(process.env.WEBOPS_TIMEOUT_MS || '2100000', 10),
+      inactivityMs: parseInt(process.env.WEBOPS_INACTIVITY_MS || '180000', 10),
+      stuckThreshold: 3,
+    });
 
     try {
       for await (const message of query({
@@ -215,7 +397,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
           permissionMode: 'bypassPermissions',
           allowDangerouslySkipPermissions: true,
           mcpServers: { 'webops-tools': webOpsTools },
-          abortController: webOpsAbort,
+          abortController: webOpsWatchdog.abort,
           hooks: {
             PostToolUse: [{ hooks: [webOpsHook] }],
           },
@@ -253,24 +435,21 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
         if (msg.type === 'assistant' && 'content' in msg) {
           webOpsTurnCounter++;
           const content = msg.content as Array<Record<string, unknown>>;
-          const toolUses = content
+          const toolUseCalls = content
             .filter((c) => c.type === 'tool_use')
-            .map((c) => c.name as string);
-          if (toolUses.length > 0) {
+            .map((c) => ({ name: c.name as string, input: c.input }));
+          if (toolUseCalls.length > 0) {
             webOpsConsecutiveTextOnlyTurns = 0;
-            webOpsLastToolUseTime = Date.now();
-            for (const tool of toolUses) {
+            for (const call of toolUseCalls) {
+              const status = webOpsWatchdog.recordToolUse(call.name, call.input);
               eventBus?.send({
                 event_type: 'task_started',
                 agent_name: 'webops',
                 step_name: 'collection',
-                tool_name: tool,
-                message: `turn ${webOpsTurnCounter}: ${tool}`,
+                tool_name: call.name,
+                message: `turn ${webOpsTurnCounter}: ${call.name}`,
               });
-              if (tool.includes('write_observation')) {
-                webOpsHasWrittenObservation = true;
-                startWebOpsIdleWatch();
-              }
+              if (status === 'stuck') break;
             }
           } else {
             webOpsConsecutiveTextOnlyTurns++;
@@ -281,7 +460,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
             console.warn(`[webops] WARNING: text-only turn ${webOpsTurnCounter} (${webOpsConsecutiveTextOnlyTurns} consecutive, no tool calls): ${textContent}`);
             if (webOpsConsecutiveTextOnlyTurns >= 2) {
               console.warn(`[webops] Aborting: ${webOpsConsecutiveTextOnlyTurns} consecutive text-only turns`);
-              webOpsAbort.abort();
+              webOpsWatchdog.abort.abort();
               break;
             }
           }
@@ -311,8 +490,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
         }
       }
     } finally {
-      clearTimeout(webOpsTimer);
-      if (webOpsIdleTimer) clearInterval(webOpsIdleTimer);
+      webOpsWatchdog.dispose();
     }
 
     // ── WebOps step summary ───────────────────────────────────────────
@@ -454,13 +632,12 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
     let dsaTurnCounter = 0;
     let dsaConsecutiveTextOnlyTurns = 0;
 
-    // ── Phase timeout via AbortController ──
-    const dsaTimeoutMs = parseInt(process.env.DSA_TIMEOUT_MS || '300000', 10);
-    const dsaAbort = new AbortController();
-    const dsaTimer = setTimeout(() => {
-      console.warn(`[dsa] Phase timeout reached (${dsaTimeoutMs}ms), aborting`);
-      dsaAbort.abort();
-    }, dsaTimeoutMs);
+    const dsaWatchdog = createPhaseWatchdog({
+      phaseName: 'dsa',
+      hardTimeoutMs: parseInt(process.env.DSA_TIMEOUT_MS || '300000', 10),
+      inactivityMs: parseInt(process.env.DSA_INACTIVITY_MS || '120000', 10),
+      stuckThreshold: 3,
+    });
 
     try {
       for await (const message of query({
@@ -473,7 +650,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
           permissionMode: 'bypassPermissions',
           allowDangerouslySkipPermissions: true,
           mcpServers: { 'dsa-tools': dsaTools },
-          abortController: dsaAbort,
+          abortController: dsaWatchdog.abort,
           hooks: {
             PostToolUse: [{ hooks: [dsaHook] }],
           },
@@ -511,19 +688,21 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
         if (msg.type === 'assistant' && 'content' in msg) {
           dsaTurnCounter++;
           const content = msg.content as Array<Record<string, unknown>>;
-          const toolUses = content
+          const toolUseCalls = content
             .filter((c) => c.type === 'tool_use')
-            .map((c) => c.name as string);
-          if (toolUses.length > 0) {
+            .map((c) => ({ name: c.name as string, input: c.input }));
+          if (toolUseCalls.length > 0) {
             dsaConsecutiveTextOnlyTurns = 0;
-            for (const tool of toolUses) {
+            for (const call of toolUseCalls) {
+              const status = dsaWatchdog.recordToolUse(call.name, call.input);
               eventBus?.send({
                 event_type: 'task_started',
                 agent_name: 'dsa',
                 step_name: 'analysis',
-                tool_name: tool,
-                message: `turn ${dsaTurnCounter}: ${tool}`,
+                tool_name: call.name,
+                message: `turn ${dsaTurnCounter}: ${call.name}`,
               });
+              if (status === 'stuck') break;
             }
           } else {
             dsaConsecutiveTextOnlyTurns++;
@@ -534,7 +713,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
             console.warn(`[dsa] WARNING: text-only turn ${dsaTurnCounter} (${dsaConsecutiveTextOnlyTurns} consecutive, no tool calls): ${textContent}`);
             if (dsaConsecutiveTextOnlyTurns >= 2) {
               console.warn(`[dsa] Aborting: ${dsaConsecutiveTextOnlyTurns} consecutive text-only turns`);
-              dsaAbort.abort();
+              dsaWatchdog.abort.abort();
               break;
             }
           }
@@ -564,7 +743,7 @@ export async function executeQuestion(runId: string, eventBus?: RunEventBus): Pr
         }
       }
     } finally {
-      clearTimeout(dsaTimer);
+      dsaWatchdog.dispose();
     }
 
     // ── DSA step summary ──────────────────────────────────────────────
