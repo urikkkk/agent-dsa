@@ -1,0 +1,13 @@
+services:
+  agent:
+    build: .
+    env_file: .env.local
+    restart: unless-stopped
+
+  server:
+    build: .
+    command: ["npx", "tsx", "agent/src/serve.ts"]
+    env_file: .env.local
+    ports:
+      - "3001:3001"
+    restart: unless-stopped
