@@ -26,6 +26,10 @@ const ALLOWED_TOOLS: Record<AgentName, Set<string>> = {
     'read_candidates',
     'write_answer',
   ]),
+  planner: new Set([
+    'read_config',
+    'submit_plan',
+  ]),
 };
 
 /**
