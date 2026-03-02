@@ -101,7 +101,7 @@ export function createLoggingHook(
           (toolInput?.url as string) ??
           toolName;
         const location = (toolInput?.zip_code as string) ?? undefined;
-        const taskId = generateTaskId(runId, retailerId, toolName, keyword, location);
+        const taskId = generateTaskId(runId, retailerId, baseName, keyword, location);
 
         // ── Resolve started event for span linkage ──
         let parentSpanId: string | undefined;
