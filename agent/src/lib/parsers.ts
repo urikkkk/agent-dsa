@@ -6,8 +6,42 @@ import type {
 import { parseSize, computeUnitPrice } from './normalize.js';
 
 /**
+ * Extract raw items from a Nimble WSA SERP response.
+ * The WSA response shape is: { url, task_id, status, data: { html, parsing: [...], headers } }
+ * where `parsing` is an array of product objects.
+ * Fallback paths: data.parsed_items, data.results, or data as a top-level array.
+ */
+export function extractSerpItems(responseData: unknown): unknown[] {
+  if (!responseData || typeof responseData !== 'object') return [];
+  const outer = responseData as Record<string, unknown>;
+  const rawData = outer?.data;
+
+  let parsedItems: unknown[] = [];
+
+  if (rawData && typeof rawData === 'object') {
+    const d = rawData as Record<string, unknown>;
+    if (d.parsing && typeof d.parsing === 'object') {
+      parsedItems = Array.isArray(d.parsing)
+        ? d.parsing
+        : Object.values(d.parsing as Record<string, unknown>);
+    }
+    if (parsedItems.length === 0 && Array.isArray(d.parsed_items)) {
+      parsedItems = d.parsed_items;
+    }
+    if (parsedItems.length === 0 && Array.isArray(d.results)) {
+      parsedItems = d.results;
+    }
+  }
+  if (parsedItems.length === 0 && Array.isArray(rawData)) {
+    parsedItems = rawData;
+  }
+
+  return parsedItems;
+}
+
+/**
  * Parse SERP results from Nimble WSA agent response.
- * WSA agents return parsed_items with fields like:
+ * WSA agents return product objects with fields like:
  * product_name, asin, price, rating, review_count, product_url, etc.
  */
 export function parseSerpResults(rawData: unknown): NimbleSerpResult[] {

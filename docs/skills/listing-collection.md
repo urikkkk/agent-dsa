@@ -38,8 +38,10 @@ Does NOT cover: Product detail page extraction (see `detail-collection`), retail
    - Request logged to `nimble_requests` before call
    - Response logged to `nimble_responses` after call
 
-3. **Parse results** with `parseSerpResults()`:
-   - Raw data comes from `result.data.data.parsed_items[]`
+3. **Parse results** with `extractSerpItems()` + `parseSerpResults()`:
+   - Raw items extracted via `extractSerpItems(responseData)` from `agent/src/lib/parsers.ts`
+   - Primary path: `result.data.data.parsing[]` (array of product objects)
+   - Fallback paths: `data.parsed_items[]`, `data.results[]`, or `data` as array
    - Each item maps to `NimbleSerpResult`:
      - `rank` — position in search results
      - `title` — product name (`product_name` or `title` or `name`)
