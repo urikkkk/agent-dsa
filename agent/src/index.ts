@@ -38,6 +38,19 @@ async function pollForPendingRuns(): Promise<void> {
   }
 
   const run = runs[0];
+
+  // Atomically claim the run — only succeeds if still pending
+  const { data: claimed } = await db
+    .from('runs')
+    .update({ status: 'running', updated_at: new Date().toISOString() })
+    .eq('id', run.id)
+    .eq('status', 'pending')
+    .select('id');
+
+  if (!claimed || claimed.length === 0) {
+    return; // another process already claimed it
+  }
+
   console.log(`\n--- Picking up run ${run.id} ---`);
   console.log(`Question: ${run.question_text || '(no question)'}`);
 

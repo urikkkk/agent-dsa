@@ -84,7 +84,7 @@ async function main(): Promise<void> {
       question_text: question,
       location_id: locationId,
       retailer_ids: retailerIds,
-      status: 'pending',
+      status: 'running',
       parameters: { source: 'cli' },
     })
     .select('id')
