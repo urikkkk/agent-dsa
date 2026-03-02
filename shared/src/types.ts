@@ -15,6 +15,7 @@ export type ProductCategory =
 
 export type RunStatus =
   | 'pending'
+  | 'planning'
   | 'collecting'
   | 'analyzing'
   | 'running'
@@ -56,6 +57,15 @@ export type QuestionType =
   | 'serp_sov'
   | 'assortment_coverage'
   | 'promotion_scan';
+
+export interface CollectionPlan {
+  question_type: QuestionType;
+  keywords: Array<{
+    keyword: string;
+    priority: number;
+  }>;
+  retailers: string[];
+}
 
 export type AnswerStatus = 'pending' | 'ready' | 'error';
 
@@ -384,7 +394,7 @@ export interface AgentLog {
 
 // --- Ledger / Observability ---
 
-export type AgentName = 'webops' | 'dsa';
+export type AgentName = 'webops' | 'dsa' | 'planner';
 
 export type LedgerEventStatus = 'started' | 'completed' | 'failed' | 'skipped' | 'retrying';
 

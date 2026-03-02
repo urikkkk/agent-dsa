@@ -1,10 +1,11 @@
-import type { Run, Location, Retailer, NimbleAgent } from '@agent-dsa/shared';
+import type { Run, Location, Retailer, NimbleAgent, CollectionPlan } from '@agent-dsa/shared';
 import { loadSkillContent } from '../system-prompt.js';
 
 interface WebOpsPromptContext {
   run: Run;
   location?: Location;
   retailers: Array<Retailer & { serp_agent?: NimbleAgent; pdp_agent?: NimbleAgent }>;
+  plan?: CollectionPlan;
 }
 
 export function buildWebOpsPrompt(ctx: WebOpsPromptContext): string {
@@ -42,6 +43,13 @@ export function buildWebOpsPrompt(ctx: WebOpsPromptContext): string {
     .filter(Boolean)
     .join('\n\n');
 
+  const planSection = ctx.plan
+    ? `\n## Collection Plan
+- Question type: ${ctx.plan.question_type}
+- Keywords (priority order): ${ctx.plan.keywords.sort((a, b) => a.priority - b.priority).map((k) => `${k.keyword} (p${k.priority})`).join(', ')}
+- Target retailers: ${ctx.plan.retailers.join(', ')}\n`
+    : '';
+
   return `You are a web data collection specialist for General Mills. Your job is to search retailer websites and collect product data (prices, availability, sizes, ratings).
 
 ## Your Role
@@ -51,7 +59,7 @@ You ONLY collect data. You do NOT analyze it or write answers. Another agent han
 - Run ID: ${ctx.run.id}
 - Question: ${ctx.run.question_text || 'No specific question'}
 - ${locationInfo}
-
+${planSection}
 ## Retailers & Agents
 ${retailerInfo || 'No retailers configured.'}
 
