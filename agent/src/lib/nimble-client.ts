@@ -50,6 +50,9 @@ export class NimbleClient {
 
       if (!response.ok) {
         const text = await response.text().catch(() => '');
+        if (response.status === 400) {
+          console.error(`[NimbleClient] 400 Bad Request on ${endpoint}:`, text.slice(0, 500));
+        }
         throw new NimbleApiError(
           response.status,
           `Nimble API error: ${response.status} ${response.statusText}`,

@@ -16,6 +16,8 @@ export interface ValidationInput {
   rating?: number;
   confidence?: number;
   category?: string;
+  /** Collection tier — 'wsa' means SERP-level data (no size info expected). */
+  collection_tier?: string;
 }
 
 export interface ValidationOutput {
@@ -29,6 +31,7 @@ export function runValidationChecks(args: ValidationInput): ValidationOutput {
   const reasons: string[] = [];
   let severity: ValidationStatus = 'pass';
   const category = args.category || 'other';
+  const isWsaTier = args.collection_tier === 'wsa';
 
   // Price non-null check
   if (args.shelf_price == null) {
@@ -44,7 +47,7 @@ export function runValidationChecks(args: ValidationInput): ValidationOutput {
 
   // Category-specific price bounds
   const priceBounds: Record<string, [number, number]> = {
-    cereal: [0.5, 30],
+    cereal: [0.5, 40],
     snacks: [0.5, 25],
     baking: [0.5, 20],
     yogurt: [0.3, 15],
@@ -76,14 +79,15 @@ export function runValidationChecks(args: ValidationInput): ValidationOutput {
     if (severity !== 'fail') severity = 'warn';
   }
 
-  // Size parseable check
-  if (args.size_oz == null || args.size_oz === 0) {
+  // Size parseable check — skip for WSA tier (SERP snippets don't include size)
+  if (!isWsaTier && (args.size_oz == null || args.size_oz === 0)) {
     reasons.push('Size could not be parsed');
     if (severity !== 'fail') severity = 'warn';
   }
 
-  // Unit price consistency
+  // Unit price consistency — skip for WSA tier (no size data to compare)
   if (
+    !isWsaTier &&
     args.shelf_price &&
     args.size_oz &&
     args.size_oz > 0 &&
@@ -132,7 +136,7 @@ export function runValidationChecks(args: ValidationInput): ValidationOutput {
   if (severity === 'fail') qualityScore = 0.3;
   else if (severity === 'warn') qualityScore = 0.7;
   if (!args.shelf_price || args.shelf_price <= 0) qualityScore -= 0.3;
-  if (!args.size_oz || args.size_oz <= 0) qualityScore -= 0.1;
+  if (!isWsaTier && (!args.size_oz || args.size_oz <= 0)) qualityScore -= 0.1;
   qualityScore = Math.max(0, Math.min(1, qualityScore));
 
   return {
