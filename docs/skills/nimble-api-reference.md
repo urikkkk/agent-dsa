@@ -49,7 +49,11 @@ content_type: "application/json"
 ```
 Note: Both `zip_code` and `zipcode` are sent to accommodate retailer variations.
 
-**Response:** `{ url, task_id, status, data: { parsed_items: [...] } }`
+**Response:** `{ url, task_id, status, data: { html, parsing: [...], headers } }`
+- `data.parsing` is an ARRAY of product objects (not an object with numeric keys)
+- Each item has: `product_name`, `product_price`, `product_url`, `position`, `is_sponsored`, etc.
+- Fallback paths: `data.parsed_items`, `data.results`, or `data` as array
+- See `wsa-response-reference.md` for full field mapping
 
 ### POST /v1/search
 ```json
@@ -143,7 +147,7 @@ delay = min(base_delay * 2^(attempt-1) + random(-jitter, +jitter), max_delay)
 
 ### Example: Successful WSA call
 - POST `/v1/agents/run` with `agent: "amazon_serp"`, `params: { keyword: "Cheerios" }`
-- Response 200: `{ data: { parsed_items: [...] } }`
+- Response 200: `{ url, task_id, status, data: { parsing: [...] } }`
 
 ### Example: Rate limited then success
 - Attempt 1: 429 -> wait 3000ms + jitter

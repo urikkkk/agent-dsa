@@ -3,7 +3,7 @@ import { tool } from '@anthropic-ai/claude-agent-sdk';
 import { getNimbleClient } from '../lib/nimble-client.js';
 import { withRetry } from '../lib/retry.js';
 import { isCircuitOpen } from '../lib/retry.js';
-import { parseSerpResults } from '../lib/parsers.js';
+import { extractSerpItems, parseSerpResults } from '../lib/parsers.js';
 import { getSupabase, withTimeout } from '../lib/supabase.js';
 import { generateTaskId, getAttemptNumber, emitLedgerEvent } from '../lib/ledger.js';
 
@@ -131,12 +131,11 @@ export const serpSearchTool = tool(
       };
     }
 
-    // The WSA response has data.parsed_items (array of structured items)
+    // Extract items from WSA response using shared utility
+    // WSA response shape: { url, task_id, status, data: { parsing: [...] } }
     const responseData = result.data as unknown as Record<string, unknown>;
-    const rawData = responseData?.data as Record<string, unknown>;
-    const parsedItems = (rawData?.parsed_items as unknown[]) || [];
-
-    const parsed = parseSerpResults(parsedItems);
+    const rawItems = extractSerpItems(responseData);
+    const parsed = parseSerpResults(rawItems);
 
     // Log response
     if (requestId) {

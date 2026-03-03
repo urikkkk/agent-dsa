@@ -7,9 +7,11 @@ export interface RetryOptions {
   jitterMs?: number;
   /** Circuit breaker key (e.g. `${retailerId}:${toolName}`). If set, checks before each attempt. */
   circuitBreakerKey?: string;
+  /** Skip circuit breaker checks entirely. Useful for batch scripts that control retry behavior themselves. */
+  skipCircuitBreaker?: boolean;
 }
 
-const DEFAULTS: Required<Omit<RetryOptions, 'circuitBreakerKey'>> = {
+const DEFAULTS: Required<Omit<RetryOptions, 'circuitBreakerKey' | 'skipCircuitBreaker'>> = {
   maxAttempts: 3,
   baseDelayMs: 1000,
   maxDelayMs: 10000,
@@ -31,7 +33,7 @@ export interface RetryResult<T> {
 // since transient failures (e.g. network blips) shouldn't persist across deploys.
 const circuitBreakers = new Map<string, CircuitBreakerState>();
 
-const CIRCUIT_BREAKER_THRESHOLD = 3;
+const CIRCUIT_BREAKER_THRESHOLD = 5;
 const CIRCUIT_BREAKER_RESET_MS = 60_000;
 
 export function isCircuitOpen(key: string): boolean {
@@ -73,12 +75,13 @@ export async function withRetry<T>(
   fn: () => Promise<T>,
   opts?: RetryOptions
 ): Promise<RetryResult<T>> {
-  const { circuitBreakerKey, ...rest } = opts ?? {};
+  const { circuitBreakerKey, skipCircuitBreaker, ...rest } = opts ?? {};
   const options = { ...DEFAULTS, ...rest };
   const errors: RetryResult<T>['errors'] = [];
+  const useCb = circuitBreakerKey && !skipCircuitBreaker;
 
   // Circuit breaker pre-check
-  if (circuitBreakerKey && isCircuitOpen(circuitBreakerKey)) {
+  if (useCb && isCircuitOpen(circuitBreakerKey)) {
     return {
       success: false,
       attempts: 0,
@@ -89,10 +92,10 @@ export async function withRetry<T>(
   for (let attempt = 1; attempt <= options.maxAttempts; attempt++) {
     try {
       const data = await fn();
-      if (circuitBreakerKey) recordSuccess(circuitBreakerKey);
+      if (useCb) recordSuccess(circuitBreakerKey);
       return { success: true, data, attempts: attempt, errors };
     } catch (err) {
-      if (circuitBreakerKey) recordFailure(circuitBreakerKey);
+      if (useCb) recordFailure(circuitBreakerKey);
 
       const backoffMs = Math.min(
         options.baseDelayMs * Math.pow(2, attempt - 1) +
@@ -106,7 +109,7 @@ export async function withRetry<T>(
       });
 
       // Check if circuit opened after this failure
-      if (circuitBreakerKey && isCircuitOpen(circuitBreakerKey)) {
+      if (useCb && isCircuitOpen(circuitBreakerKey)) {
         return { success: false, attempts: attempt, errors };
       }
 
